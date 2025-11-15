@@ -1,0 +1,42 @@
+experiment_name: ksparse_parity_demo
+seed: 123
+device: cpu
+
+dataset:
+  d: 128
+  k: 3
+  n_train: 2000
+  n_val: 500
+  n_test: 1000
+  label_noise: 0.0
+  x_dist: pm1   # or: bernoulli01
+
+model:
+  widths: [100, 100, 100]
+  use_gates: true  # false -> plain ReLU network
+  bias: false
+
+training:
+  algo: alt_em_closed_form   # sgd_relu | alt_em_sgd | alt_em_closed_form
+  epochs: 20                 # used only by sgd_relu
+  batch_size: 256
+  lr_w: 1e-3                 # for SGD variants
+  lr_a: 1e-3
+  cycles: 10                 # for alternating algorithms
+  steps_w_per_cycle: 200     # for alt_em_sgd
+  steps_a_per_cycle: 100     # for alt_em_sgd
+  ridge_w: 1e-4              # ridge for closed-form W-step
+  ridge_a: 1e-4              # ridge for closed-form A-step
+  loss: mse                  # squared loss (labels in {-1,+1})
+
+regularization:
+  identity_reg: true
+  lambda_identity: 1e-3
+
+pruning:
+  enabled: true
+  tau: 0.01     # prune if |a-1| <= tau (both sides)
+
+logging:
+  eval_every_cycle: true
+  save_checkpoints: true
