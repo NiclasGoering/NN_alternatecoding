@@ -3,23 +3,23 @@ seed: 123
 device: cpu
 
 dataset:
-  d: 128
-  k: 3
-  n_train: 2000
+  d: 35
+  k: 4
+  n_train: 5000
   n_val: 500
-  n_test: 1000
+  n_test: 2000
   label_noise: 0.0
   x_dist: pm1   # or: bernoulli01
 
 model:
-  widths: [100, 100, 100]
+  widths: [128, 128, 128]
   use_gates: true  # false -> plain ReLU network
   bias: false
 
 training:
-  algo: alt_em_closed_form   # sgd_relu | alt_em_sgd | alt_em_closed_form
-  epochs: 20                 # used only by sgd_relu
-  batch_size: 256
+  algo: alt_em_closed_form   # NOTE: All algorithms (sgd_relu, alt_em_sgd, alt_em_closed_form) run sequentially automatically
+  epochs: 200                 # used only by sgd_relu
+  batch_size: 1024
   lr_w: 1e-3                 # for SGD variants
   lr_a: 1e-3
   cycles: 10                 # for alternating algorithms
@@ -35,7 +35,7 @@ regularization:
 
 pruning:
   enabled: true
-  tau: 0.01     # prune if |a-1| <= tau (both sides)
+  tau: 0.0     # prune if |a-1| <= tau (both sides)
 
 logging:
   eval_every_cycle: true
