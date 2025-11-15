@@ -69,6 +69,19 @@ def run_algorithm(algo_name, train_loader, full_train_loader, val_loader, test_l
         "test_loss": teL,
         "subset_S": list(map(int, S))
     }
+    
+    # Add final slope metrics for gated algorithms (from last history entry)
+    if hist and len(hist) > 0:
+        last_entry = hist[-1]
+        if "slope_budget_total" in last_entry and last_entry["slope_budget_total"] is not None:
+            final_metrics["final_slope_budget_total"] = last_entry["slope_budget_total"]
+            final_metrics["final_slope_budget_layers"] = last_entry.get("slope_budget_layers")
+        if "slope_entropy_total" in last_entry and last_entry["slope_entropy_total"] is not None:
+            final_metrics["final_slope_entropy_total"] = last_entry["slope_entropy_total"]
+            final_metrics["final_slope_entropy_layers"] = last_entry.get("slope_entropy_layers")
+        if "slope_deviation_layers" in last_entry and last_entry["slope_deviation_layers"] is not None:
+            final_metrics["final_slope_deviation_layers"] = last_entry["slope_deviation_layers"]
+    
     save_json(final_metrics, os.path.join(algo_dir, "final_metrics.json"))
     
     # Save training history

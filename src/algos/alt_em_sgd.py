@@ -45,9 +45,9 @@ def mask_churn(prev_masks, cur_masks):
 def train_alt_em_sgd(model, train_loader, val_loader, config):
     device  = config["device"]
     t, r, p = config["training"], config["regularization"], config["pruning"]
-    cycles, lr_w, lr_a = t["cycles"], t["lr_w"], t["lr_a"]
-    k_w, k_a = t["steps_w_per_cycle"], t["steps_a_per_cycle"]
-    lam = r["lambda_identity"] if r["identity_reg"] else 0.0
+    cycles, lr_w, lr_a = int(t["cycles"]), float(t["lr_w"]), float(t["lr_a"])
+    k_w, k_a = int(t["steps_w_per_cycle"]), int(t["steps_a_per_cycle"])
+    lam = float(r["lambda_identity"]) if r["identity_reg"] else 0.0
 
     model.to(device)
     history = []
@@ -87,7 +87,7 @@ def train_alt_em_sgd(model, train_loader, val_loader, config):
 
         pruning_stats = []
         if getattr(model, "use_gates", False) and p["enabled"]:
-            pruning_stats = prune_identity_like(model, tau=p["tau"])
+            pruning_stats = prune_identity_like(model, tau=float(p["tau"]))
 
         tr_acc, tr_loss = eval_loader(model, train_loader, device)
         va_acc, va_loss = eval_loader(model, val_loader, device)

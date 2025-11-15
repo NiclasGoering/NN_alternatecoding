@@ -5,8 +5,8 @@ from ..utils.metrics import mse_loss, accuracy_from_logits
 
 def train_sgd_relu(model, train_loader, val_loader, config):
     device = config["device"]
-    epochs = config["training"]["epochs"]
-    lr = config["training"]["lr_w"]
+    epochs = int(config["training"]["epochs"])
+    lr = float(config["training"]["lr_w"])
 
     # Force plain ReLU
     model.use_gates = False
