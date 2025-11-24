@@ -1,0 +1,76 @@
+# config_hierarchical_xor.yaml
+experiment_name: 24_11/hierarchical_xor_run_1
+seed: 123
+device: cpu
+
+dataset:
+  name: hierarchical_xor          # <--- use new hierarchical XOR dataset
+  # hierarchy shape
+  L: 3
+  m: 2
+  s: 4
+  # sizes (can be a list to train on multiple sizes)
+  n_train: [100,500,1000,2500,5000,7500,10000]  #[128, 512, 1024, 2048, 3072, 5120, 7168, 8192, 12288, 16384, 18432, 22528, 28672, 32768]
+  n_val: 2000
+  n_test: 5000
+  # nuisance
+  distractor_dims: 128
+
+model:
+  widths: [1024, 1024, 1024,1024]
+  use_gates: true
+  bias: false
+
+training:
+  algo: [sgd_joint, alt_em_sgd, sgd_relu]     # specify which algorithms to run (can be a list or single string)
+                         # options: sgd_relu, alt_em_sgd, alt_em_closed_form, sgd_joint
+  epochs: 5000           # (unused by closed-form; used by sgd baseline)
+  batch_size: 4096
+  lr_w: 5e-4
+  lr_a: 5e-4
+  cycles: 100            # for alt_em_sgd (fallback if alt_em_closed_form section not present)
+  steps_w_per_cycle: 50
+  steps_a_per_cycle: 5
+  ridge_w: 1e-4           # fallback for alt_em_closed_form
+  ridge_a: 1e-4           # fallback for alt_em_closed_form
+  loss: mse
+
+# Separate hyperparameters for alt_em_closed_form algorithm
+alt_em_closed_form:
+  cycles: 2000
+  beta_w: 0.1             # Step size for weight updates
+  beta_a: 0.05            # Step size for slope updates (slopes are very sensitive, move slow)
+  ridge_w: 0.0001          # Stabilize the linear solve for weights
+  ridge_a: 0.0001            # Stabilize the linear solve for slopes
+  ridge_out: 1e-4          # Stabilize the readout
+  # Backtracking settings (Crucial for ensuring loss goes DOWN)
+  improve_tol: 1e-5       # Require at least tiny improvement
+  max_backtracks: 10      # Allow it to try smaller steps if loss spikes
+  lm_up: 3.0             # If loss spikes, shrink step by 10x
+  lm_down: 0.8           # If loss improves, grow step slowly
+  slope_clamp: [-100.0, 100.0] # Clamp slopes to this range
+  beta_min: 0.01          # Minimum step size during backtracking
+  target_churn: 0.05      # Target mask churn rate (5%) - adaptive beta adjusts to maintain this
+  churn_decay: 0.3        # Multiply beta by this if churn is too high
+  churn_growth: 1.01      # Grow beta painfully slowly
+
+regularization:
+  identity_reg: true    # turn on to study nonlinearity penalty easily
+  lambda_identity: [0, 1e-4, 1e-3, 1e-2, 1e-1, 1.0]  # can be a list to train with multiple lambda values
+
+pruning:
+  enabled: false
+  tau: 0.0
+
+logging:
+  eval_every_cycle: true
+  save_checkpoints: true
+  save_model: true  # Set to false to skip saving model files (saves disk space)
+  # Computation frequency controls (for speed optimization)
+  # Path metrics: Compute full path metrics every N epochs (only for epoch-based training like sgd_joint)
+  # NOTE: For alternating EM algorithms (alt_em_sgd, alt_em_closed_form), path metrics are ALWAYS computed every cycle
+  # Path hashes are still computed every cycle/epoch for confident churn tracking
+  path_metrics_every_n_epochs: 20  # Set to 1 to compute every epoch (slower but more detailed)
+  # Effective rank: Uses SVD which is expensive. Compute every N cycles/epochs
+  effective_rank_every_n_cycles: 50  # Set to 1 to compute every cycle (slower)
+

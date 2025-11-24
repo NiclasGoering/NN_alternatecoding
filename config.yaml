@@ -1,4 +1,4 @@
-experiment_name: ksparse_parity_1511_new
+experiment_name: ksparse_parity_1511_new2_t001
 seed: 123
 device: cpu
 
@@ -18,13 +18,13 @@ model:
 
 training:
   algo: alt_em_closed_form   # NOTE: All algorithms (sgd_relu, alt_em_sgd, alt_em_closed_form) run sequentially automatically
-  epochs: 400                 # used only by sgd_relu
-  batch_size: 2048
-  lr_w: 1e-3                 # for SGD variants
-  lr_a: 1e-3
+  epochs: 800                 # used only by sgd_relu
+  batch_size: 4096
+  lr_w: 7e-4                 # for SGD variants
+  lr_a: 7e-4
   cycles: 100                 # for alternating algorithms
-  steps_w_per_cycle: 20     # for alt_em_sgd
-  steps_a_per_cycle: 20     # for alt_em_sgd
+  steps_w_per_cycle: 200     # for alt_em_sgd
+  steps_a_per_cycle: 200     # for alt_em_sgd
   ridge_w: 1e-4              # ridge for closed-form W-step
   ridge_a: 1e-4              # ridge for closed-form A-step
   loss: mse                  # squared loss (labels in {-1,+1})
@@ -34,8 +34,8 @@ regularization:
   lambda_identity: 1e-3
 
 pruning:
-  enabled: false
-  tau: 0.0     # prune if |a-1| <= tau (both sides)
+  enabled: true
+  tau: 0.01     # prune if |a-1| <= tau (both sides)
 
 logging:
   eval_every_cycle: true
