@@ -257,6 +257,8 @@ def train_alt_em_closed_form(model, full_train_loader, val_loader, config, test_
     # NOTE: Path metrics are ALWAYS computed every cycle for alternating EM (only 100 cycles, need full detail)
     logging_cfg = config.get("logging", {})
     effective_rank_freq = int(logging_cfg.get("effective_rank_every_n_cycles", 1))
+    path_analysis_freq = int(logging_cfg.get("path_analysis_every_n_cycles", 10))  # Default: every 10 cycles
+    path_analysis_out_dir = config.get("path_analysis_out_dir", None)  # Output directory for path analysis plots
     ridge_a = float(alt_cfg.get("ridge_a", t.get("ridge_a", 1.0)))     
     ridge_w = float(alt_cfg.get("ridge_w", t.get("ridge_w", 10.0)))    
     beta_a = float(alt_cfg.get("beta_a", t.get("beta_a", 0.1)))       
@@ -457,6 +459,26 @@ def train_alt_em_closed_form(model, full_train_loader, val_loader, config, test_
                 eff_ranks = None  # Skip expensive SVD computation
 
             print(f"Cyc {cyc} | TrL: {tr_loss:.4f} | VaL: {va_loss:.4f} | Churn: {max_churn:.3f} | BetaW: {beta_w:.4f} | BetaA: {beta_a:.4f} | Bdgt: {B_total if B_total else 0:.2f}")
+
+            # Run path analysis at intervals (start, end, and every N cycles)
+            if path_analysis_out_dir is not None and ((cyc % path_analysis_freq == 0) or (cyc == 1) or (cyc == cycles)):
+                try:
+                    from ..analysis.path_analysis import run_full_analysis_at_checkpoint
+                    run_full_analysis_at_checkpoint(
+                        model=model,
+                        val_loader=val_loader,
+                        out_dir=path_analysis_out_dir,
+                        step_tag=f"cycle_{cyc:04d}",
+                        kernel_k=48,
+                        kernel_mode="routing_gain",
+                        include_input_in_kernel=True,
+                        block_size=1024,
+                        max_samples_kernel=5000,  # Limit samples for speed
+                        max_samples_embed=5000,
+                    )
+                    print(f"  [path_analysis] Completed for cycle {cyc}")
+                except Exception as e:
+                    print(f"  [path_analysis] Warning: Failed at cycle {cyc}: {e}")
 
             hist_entry = {
                 "cycle": cyc,

@@ -11,6 +11,8 @@ def train_sgd_relu(model, train_loader, val_loader, config, test_loader=None):
     # Computation frequency controls (for speed optimization)
     logging_cfg = config.get("logging", {})
     effective_rank_freq = int(logging_cfg.get("effective_rank_every_n_cycles", 1))
+    path_analysis_freq = int(logging_cfg.get("path_metrics_every_n_epochs", 250))  # Use path_metrics_every_n_epochs flag
+    path_analysis_out_dir = config.get("path_analysis_out_dir", None)  # Output directory for path analysis plots
 
     # Force plain ReLU
     model.use_gates = False
@@ -56,6 +58,27 @@ def train_sgd_relu(model, train_loader, val_loader, config, test_loader=None):
         if va_loss < 0.01:
             print(f"Early stopping: validation loss {va_loss:.6f} < 0.01")
             early_stopped = True
+
+        # Run path analysis at intervals (start, end, and every N epochs)
+        # Note: sgd_relu doesn't use gates, so path analysis will use routing mode (binary)
+        if path_analysis_out_dir is not None and ((ep % path_analysis_freq == 0) or (ep == 1) or (ep == epochs)):
+            try:
+                from ..analysis.path_analysis import run_full_analysis_at_checkpoint
+                run_full_analysis_at_checkpoint(
+                    model=model,
+                    val_loader=val_loader,
+                    out_dir=path_analysis_out_dir,
+                    step_tag=f"epoch_{ep:04d}",
+                    kernel_k=48,
+                    kernel_mode="routing",  # sgd_relu doesn't have gates, so use routing mode
+                    include_input_in_kernel=True,
+                    block_size=1024,
+                    max_samples_kernel=5000,  # Limit samples for speed
+                    max_samples_embed=5000,
+                )
+                print(f"  [path_analysis] Completed for epoch {ep}")
+            except Exception as e:
+                print(f"  [path_analysis] Warning: Failed at epoch {ep}: {e}")
 
         if test_loss is not None:
             history.append({"epoch": ep, "train_loss": tr_loss, "train_acc": tr_acc,

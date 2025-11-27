@@ -1,5 +1,5 @@
 # config_hierarchical_xor.yaml
-experiment_name: 24_11/hierarchical_xor_run_1
+experiment_name: 24_11/hierarchical_xor_run_3
 seed: 123
 device: cpu
 
@@ -10,14 +10,14 @@ dataset:
   m: 2
   s: 4
   # sizes (can be a list to train on multiple sizes)
-  n_train: [100,500,1000,2500,5000,7500,10000]  #[128, 512, 1024, 2048, 3072, 5120, 7168, 8192, 12288, 16384, 18432, 22528, 28672, 32768]
+  n_train: [5000,100,500,1000,2500,7500,10000]  #[128, 512, 1024, 2048, 3072, 5120, 7168, 8192, 12288, 16384, 18432, 22528, 28672, 32768]
   n_val: 2000
   n_test: 5000
   # nuisance
   distractor_dims: 128
 
 model:
-  widths: [1024, 1024, 1024,1024]
+  widths: [512, 512, 512,512]
   use_gates: true
   bias: false
 
@@ -70,7 +70,7 @@ logging:
   # Path metrics: Compute full path metrics every N epochs (only for epoch-based training like sgd_joint)
   # NOTE: For alternating EM algorithms (alt_em_sgd, alt_em_closed_form), path metrics are ALWAYS computed every cycle
   # Path hashes are still computed every cycle/epoch for confident churn tracking
-  path_metrics_every_n_epochs: 20  # Set to 1 to compute every epoch (slower but more detailed)
+  path_metrics_every_n_epochs: 250  # Set to 1 to compute every epoch (slower but more detailed)
   # Effective rank: Uses SVD which is expensive. Compute every N cycles/epochs
   effective_rank_every_n_cycles: 50  # Set to 1 to compute every cycle (slower)
 

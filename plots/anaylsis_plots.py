@@ -24,6 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 import ast
 import torch
+import copy
 
 # Add src directory to path for model imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -1169,9 +1170,134 @@ def plot_a_values_histogram_grid(experiment_dir, algorithms, output_dir):
         plt.close()
 
 
+def run_path_analysis_on_final_models(experiment_dir, algorithms, output_dir):
+    """Run path analysis on final models and save plots to path_analysis subfolder."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from src.analysis.path_analysis import run_full_analysis_at_checkpoint
+    from src.data.models.ffnn import GatedMLP
+    from torch.utils.data import DataLoader
+    import json
+    
+    # Load config to get model architecture
+    config_path = os.path.join(experiment_dir, "config.json")
+    if not os.path.exists(config_path):
+        print(f"Warning: config.json not found at {config_path}, skipping path analysis")
+        return
+    
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    # Get model architecture
+    dataset_cfg = config.get("dataset", {})
+    model_cfg = config.get("model", {})
+    
+    # Determine input dimension
+    if dataset_cfg.get("name") == "hierarchical_xor":
+        L = dataset_cfg.get("L", 3)
+        m = dataset_cfg.get("m", 2)
+        s = dataset_cfg.get("s", 4)
+        distractor_dims = dataset_cfg.get("distractor_dims", 128)
+        n_groups = m ** L
+        d_leaf = n_groups * s * 2
+        input_dim = d_leaf + distractor_dims
+    else:
+        input_dim = dataset_cfg.get("d", 35)
+    
+    widths = model_cfg.get("widths", [256, 256])
+    use_gates = model_cfg.get("use_gates", True)
+    
+    # Create path_analysis subdirectory in plots
+    path_analysis_dir = os.path.join(output_dir, "path_analysis")
+    os.makedirs(path_analysis_dir, exist_ok=True)
+    
+    # Get all combination directories
+    combo_dirs = [d for d in os.listdir(experiment_dir) 
+                  if os.path.isdir(os.path.join(experiment_dir, d)) and d.startswith('n')]
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    for combo_dir in combo_dirs:
+        n_train, lam = parse_dir_name(combo_dir)
+        if n_train is None:
+            continue
+        
+        combo_path = os.path.join(experiment_dir, combo_dir)
+        
+        for algo in algorithms:
+            algo_path = os.path.join(combo_path, algo)
+            if not os.path.isdir(algo_path):
+                continue
+            
+            final_model_path = os.path.join(algo_path, "model_final.pt")
+            if not os.path.exists(final_model_path):
+                print(f"  Skipping {algo} in {combo_dir}: model_final.pt not found")
+                continue
+            
+            print(f"  Running path analysis for {algo} in {combo_dir}...")
+            
+            try:
+                # Load model
+                model = GatedMLP(input_dim, widths, bias=False, use_gates=use_gates)
+                state_dict = torch.load(final_model_path, map_location=device)
+                model.load_state_dict(state_dict)
+                model.to(device).eval()
+                
+                # Recreate dataloader (we need val_loader for path analysis)
+                # Try to load from dataset config
+                dataset_name = dataset_cfg.get("name", "ksparse_parity").lower()
+                
+                if dataset_name == "hierarchical_xor":
+                    from src.data.hierarchical_xor import build_hierarchical_xor_datasets, HierarchicalXORDataset
+                    temp_cfg = copy.deepcopy(config)
+                    temp_cfg["dataset"]["n_train"] = n_train
+                    Xtr, ytr, Xva, yva, Xte, yte, meta, groups_tr, groups_va, groups_te = build_hierarchical_xor_datasets(temp_cfg)
+                    n_groups = meta.get("n_groups")
+                    ds_va = HierarchicalXORDataset(Xva, yva, groups=groups_va, n_groups=n_groups)
+                    val_loader = DataLoader(ds_va, batch_size=len(ds_va), shuffle=False)
+                elif dataset_name == "synonym_tree":
+                    from src.data.hierarchical_synonyms import build_synonym_tree_datasets, SynonymTreeDataset
+                    temp_cfg = copy.deepcopy(config)
+                    temp_cfg["dataset"]["n_train"] = n_train
+                    Xtr, ytr, Xva, yva, Xte, yte, meta = build_synonym_tree_datasets(temp_cfg)
+                    ds_va = SynonymTreeDataset(Xva, yva)
+                    val_loader = DataLoader(ds_va, batch_size=len(ds_va), shuffle=False)
+                else:
+                    # Default: ksparse_parity
+                    from src.data.ksparse_parity import gen_ksparse_parity, ParityDataset
+                    d, k = dataset_cfg["d"], dataset_cfg["k"]
+                    nva = dataset_cfg["n_val"]
+                    x_dist = dataset_cfg.get("x_dist", "pm1")
+                    noise = dataset_cfg.get("label_noise", 0.0)
+                    seed = config["seed"]
+                    Xva, yva, _ = gen_ksparse_parity(d, k, nva, x_dist=x_dist, label_noise=noise, seed=seed+1)
+                    ds_va = ParityDataset(Xva, yva)
+                    val_loader = DataLoader(ds_va, batch_size=len(ds_va), shuffle=False)
+                
+                # Run path analysis
+                step_tag = f"{algo}_n{n_train}_lam{lam}_final"
+                run_full_analysis_at_checkpoint(
+                    model=model,
+                    val_loader=val_loader,
+                    out_dir=path_analysis_dir,
+                    step_tag=step_tag,
+                    kernel_k=48,
+                    kernel_mode="routing_gain",
+                    include_input_in_kernel=True,
+                    block_size=1024,
+                    max_samples_kernel=5000,
+                    max_samples_embed=5000,
+                )
+                print(f"    ✓ Completed path analysis for {algo} in {combo_dir}")
+            except Exception as e:
+                print(f"    ✗ Error in path analysis for {algo} in {combo_dir}: {e}")
+                import traceback
+                traceback.print_exc()
+
+
 def main():
     # Set the experiment directory here
-    experiment_dir = "/home/goring/NN_alternatecoding/outputs/23_11/hierarchical_xor_run_2_20251123_210958"
+    experiment_dir = "/home/goring/NN_alternatecoding/outputs/24_11/hierarchical_xor_run_3_20251124_191204"
     
     if not os.path.exists(experiment_dir):
         raise ValueError(f"Experiment directory does not exist: {experiment_dir}\n"
@@ -1287,6 +1413,10 @@ def main():
     # Plot a values histograms
     print("\nCreating a values histogram grids...")
     plot_a_values_histogram_grid(experiment_dir, algorithms, output_dir)
+    
+    # Run path analysis on final models
+    print("\nRunning path analysis on final models...")
+    run_path_analysis_on_final_models(experiment_dir, algorithms, output_dir)
     
     print(f"\nAll plots saved to: {output_dir}")
 

@@ -119,11 +119,18 @@ def run_algorithm(
     algo_dir = os.path.join(out_dir, algo_name)
     ensure_dir(algo_dir)
 
+    # Create path_analysis subdirectory
+    path_analysis_dir = os.path.join(algo_dir, "path_analysis")
+    ensure_dir(path_analysis_dir)
+
     # Override λ_id if requested (sweeps)
     train_cfg = copy.deepcopy(cfg)
     if lambda_identity_override is not None:
         train_cfg.setdefault("regularization", {})
         train_cfg["regularization"]["lambda_identity"] = lambda_identity_override
+    
+    # Add path_analysis output directory to config
+    train_cfg["path_analysis_out_dir"] = path_analysis_dir
 
     # Fresh model
     model = GatedMLP(

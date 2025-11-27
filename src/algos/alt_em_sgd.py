@@ -77,10 +77,13 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
     # NOTE: Path metrics are ALWAYS computed every cycle for alternating EM (only 100 cycles, need full detail)
     logging_cfg = config.get("logging", {})
     effective_rank_freq = int(logging_cfg.get("effective_rank_every_n_cycles", 1))
+    path_analysis_freq = int(logging_cfg.get("path_analysis_every_n_cycles", 10))  # Default: every 10 cycles
+    path_analysis_out_dir = config.get("path_analysis_out_dir", None)  # Output directory for path analysis plots
 
     model.to(device)
     history = []
-    prev_masks = None
+    prev_masks = None  # For regular churn (from train_loader, first batch only)
+    prev_masks_path_metrics = None  # For path metrics (from path_loader, full dataset)
     prev_path_hashes = None  # Track path hashes for confident churn
     
     import time as time_module
@@ -194,14 +197,25 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
                         # Try to infer from group_ids
                         n_groups = int(group_ids.max() + 1) if len(group_ids) > 0 else None
             
+            # CRITICAL: prev_masks_path_metrics must be computed from the same loader (path_loader)
+            # that compute_path_metrics uses, otherwise we get size mismatches (e.g., 4096 vs 5000)
+            # Compute prev_masks_path_metrics from path_loader if it's None or if we need to update it
+            if prev_masks_path_metrics is None:
+                # First time: compute from path_loader
+                prev_masks_path_metrics = dataset_masks(model, path_loader, device)
+            
             path_metrics = compute_path_metrics(
                 model, path_loader, device=device, 
-                prev_masks=prev_masks, 
+                prev_masks=prev_masks_path_metrics,  # Use masks from path_loader, not train_loader
                 prev_path_hashes=prev_path_hashes,
-                return_masks=False,
+                return_masks=True,  # Return masks so we can update prev_masks_path_metrics
                 return_path_hashes=True,  # Need path hashes for next cycle
                 group_ids=group_ids, n_groups=n_groups
             )
+            
+            # Update prev_masks_path_metrics from returned masks for next iteration
+            if path_metrics is not None and "cur_masks" in path_metrics:
+                prev_masks_path_metrics = path_metrics["cur_masks"]
             # Update prev_path_hashes for next cycle
             if path_metrics is not None and "cur_path_hashes" in path_metrics:
                 prev_path_hashes = path_metrics["cur_path_hashes"]
@@ -228,6 +242,26 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
         if va_loss < 0.01:
             print(f"Early stopping: validation loss {va_loss:.6f} < 0.01")
             early_stopped = True
+
+        # Run path analysis at intervals (start, end, and every N cycles)
+        if path_analysis_out_dir is not None and ((cyc % path_analysis_freq == 0) or (cyc == 1) or (cyc == cycles)):
+            try:
+                from ..analysis.path_analysis import run_full_analysis_at_checkpoint
+                run_full_analysis_at_checkpoint(
+                    model=model,
+                    val_loader=val_loader,
+                    out_dir=path_analysis_out_dir,
+                    step_tag=f"cycle_{cyc:04d}",
+                    kernel_k=48,
+                    kernel_mode="routing_gain",
+                    include_input_in_kernel=True,
+                    block_size=1024,
+                    max_samples_kernel=5000,  # Limit samples for speed
+                    max_samples_embed=5000,
+                )
+                print(f"  [path_analysis] Completed for cycle {cyc}")
+            except Exception as e:
+                print(f"  [path_analysis] Warning: Failed at cycle {cyc}: {e}")
 
         hist_entry = {
             "cycle": cyc,
