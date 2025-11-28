@@ -1,7 +1,52 @@
 from __future__ import annotations
 import torch
 from torch import optim
-from ..utils.metrics import mse_loss, accuracy_from_logits, effective_rank
+
+# Local utility functions (no longer importing from utils.metrics)
+def mse_loss(yhat, y):
+    """Mean squared error loss."""
+    return torch.mean((yhat - y) ** 2)
+
+def accuracy_from_logits(yhat, y):
+    """Compute accuracy from logits."""
+    return torch.sign(yhat).eq(y).float().mean()
+
+def effective_rank(act):
+    """Compute effective rank of activations using SVD."""
+    if act.numel() == 0:
+        return 0.0
+    act_2d = act.view(act.shape[0], -1)  # Flatten to (batch, features)
+    if act_2d.shape[1] == 0:
+        return 0.0
+    try:
+        U, s, _ = torch.linalg.svd(act_2d, full_matrices=False)
+        s = s[s > 1e-8]  # Filter near-zero singular values
+        if len(s) == 0:
+            return 0.0
+        p = s / s.sum()
+        p = p[p > 1e-12]  # Avoid log(0)
+        entropy = -(p * torch.log(p)).sum()
+        return torch.exp(entropy).item()
+    except:
+        return 0.0
+
+@torch.no_grad()
+def dataset_masks(model, loader, device):
+    """Collect all sign masks z_l over the whole dataset (list of [P, d_l] bool tensors)."""
+    model.eval()
+    masks = None
+    for xb, _ in loader:
+        xb = xb.to(device)
+        _, cache = model(xb, return_cache=True)
+        batch_masks = [z.bool() for z in cache["z"]]  # Keep on GPU
+        if masks is None:
+            masks = [bm.clone() for bm in batch_masks]
+        else:
+            for l in range(len(masks)):
+                masks[l] = torch.cat([masks[l], batch_masks[l]], dim=0)
+        break  # OPTIMIZATION: Only use first batch for churn approximation to save time
+    # Move to CPU only at the end
+    return [m.cpu() for m in masks] if masks is not None else None
 
 def train_sgd_relu(model, train_loader, val_loader, config, test_loader=None):
     device = config["device"]
@@ -11,8 +56,11 @@ def train_sgd_relu(model, train_loader, val_loader, config, test_loader=None):
     # Computation frequency controls (for speed optimization)
     logging_cfg = config.get("logging", {})
     effective_rank_freq = int(logging_cfg.get("effective_rank_every_n_cycles", 1))
-    path_analysis_freq = int(logging_cfg.get("path_metrics_every_n_epochs", 250))  # Use path_metrics_every_n_epochs flag
+    path_metrics_freq = int(logging_cfg.get("path_metrics_every_n_epochs", 1))  # Compute path metrics every N epochs (set to 1 for every epoch)
+    path_kernel_metrics_freq = int(logging_cfg.get("path_kernel_metrics_every_n_epochs", 1))  # Compute path kernel metrics every N epochs
+    path_analysis_freq = path_kernel_metrics_freq  # Use same frequency as path kernel metrics
     path_analysis_out_dir = config.get("path_analysis_out_dir", None)  # Output directory for path analysis plots
+    path_kernel_metrics_freq = int(logging_cfg.get("path_kernel_metrics_every_n_epochs", 1))  # Compute path kernel metrics every N epochs
 
     # Force plain ReLU
     model.use_gates = False
@@ -21,6 +69,8 @@ def train_sgd_relu(model, train_loader, val_loader, config, test_loader=None):
     model.to(device)
     opt = optim.AdamW(model.parameters(), lr=lr)
     history = []
+    prev_masks_path_metrics = None  # For path metrics (from path_loader, full dataset)
+    prev_path_hashes = None  # Track path hashes for confident churn
     
     import time as time_module
     epoch_start_time = time_module.time()
@@ -44,6 +94,26 @@ def train_sgd_relu(model, train_loader, val_loader, config, test_loader=None):
             eff_ranks = compute_effective_ranks(model, train_loader, device)
         else:
             eff_ranks = None  # Skip expensive SVD computation
+        
+        # Compute path kernel metrics (effective rank, variance explained, etc.)
+        path_kernel_metrics = {}
+        if (ep % path_kernel_metrics_freq == 0) or (ep == 1) or (ep == epochs):
+            try:
+                from ..analysis.path_analysis import compute_path_kernel_metrics
+                test_loader_for_metrics = test_loader if test_loader is not None else val_loader
+                path_kernel_metrics = compute_path_kernel_metrics(
+                    model,
+                    train_loader,
+                    test_loader_for_metrics,
+                    mode="routing",  # ReLU uses routing mode
+                    k=48,
+                    max_samples=5000,
+                    device=device,
+                )
+            except Exception as e:
+                print(f"  [path_kernel_metrics] Warning: Failed at epoch {ep}: {e}")
+        
+        # Path metrics removed - no longer computing standard path metrics
         
         # Early stopping check
         early_stopped = False
@@ -80,14 +150,19 @@ def train_sgd_relu(model, train_loader, val_loader, config, test_loader=None):
             except Exception as e:
                 print(f"  [path_analysis] Warning: Failed at epoch {ep}: {e}")
 
+        hist_entry = {
+            "epoch": ep, 
+            "train_loss": tr_loss, "train_acc": tr_acc,
+            "val_loss": va_loss, "val_acc": va_acc,
+            "effective_rank_layers": eff_ranks
+        }
         if test_loss is not None:
-            history.append({"epoch": ep, "train_loss": tr_loss, "train_acc": tr_acc,
-                            "val_loss": va_loss, "val_acc": va_acc, "test_loss": test_loss, "test_acc": test_acc,
-                            "effective_rank_layers": eff_ranks})
-        else:
-            history.append({"epoch": ep, "train_loss": tr_loss, "train_acc": tr_acc,
-                            "val_loss": va_loss, "val_acc": va_acc,
-                            "effective_rank_layers": eff_ranks})
+            hist_entry.update({"test_loss": test_loss, "test_acc": test_acc})
+        
+        # Add path kernel metrics
+        if path_kernel_metrics:
+            hist_entry.update(path_kernel_metrics)
+        history.append(hist_entry)
         
         if early_stopped:
             break

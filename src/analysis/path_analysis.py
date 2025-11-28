@@ -145,21 +145,28 @@ def _ensure_dir(d: str):
 def plot_eig_spectrum(evals: torch.Tensor, out_path: str, *, title: str = "Eigenvalue Spectrum"):
     _ensure_dir(os.path.dirname(out_path))
     lam = evals.detach().cpu().numpy().astype(np.float64)
-    xs = np.arange(1, 1 + lam.shape[0])
+    
+    # Normalize by first (largest) eigenvalue
+    if len(lam) > 0 and lam[0] > 0:
+        lam_normalized = lam / lam[0]
+    else:
+        lam_normalized = lam
+    
+    xs = np.arange(1, 1 + lam_normalized.shape[0])
     plt.figure(figsize=(6,4))
-    plt.plot(xs, lam, marker="o")
+    plt.plot(xs, lam_normalized, marker="o", markersize=4)
     plt.yscale("log")
-    # Use plain text formatter for log scale (no LaTeX, no math notation)
+    
+    # Fix log scale formatting - use proper log formatter
     ax = plt.gca()
-    formatter = ScalarFormatter(useMathText=False)
-    formatter.set_scientific(True)
-    formatter.set_powerlimits((-3, 4))
-    ax.yaxis.set_major_formatter(formatter)
-    ax.yaxis.set_minor_formatter(ScalarFormatter(useMathText=False))
+    from matplotlib.ticker import LogFormatterSciNotation
+    ax.yaxis.set_major_formatter(LogFormatterSciNotation(labelOnlyBase=False))
+    ax.yaxis.set_minor_formatter(LogFormatterSciNotation(labelOnlyBase=False, minor_thresholds=(2, 0.4)))
+    
     plt.xlabel("rank")
-    plt.ylabel("eigenvalue")
+    plt.ylabel("eigenvalue / λ₁")  # Indicate normalization
     plt.title(title)
-    plt.grid(True, ls="--", alpha=0.3)
+    plt.grid(True, ls="--", alpha=0.3, which="both")  # Show both major and minor grid
     plt.tight_layout()
     plt.savefig(out_path, dpi=180)
     plt.close()
@@ -690,6 +697,186 @@ def plot_path_shapley_bars(
         print(f"[analysis] saved synergy heatmap -> {p2}")
 
 
+def compute_path_shapley_metrics(
+    scores: np.ndarray,  # shape [P, m] circuit scores
+    y: np.ndarray,       # labels
+) -> Dict[str, object]:
+    """
+    Compute Path-Shapley metrics (MI main effects and synergy).
+    Returns JSON-serializable dictionary.
+    """
+    if not HAVE_SK:
+        return {
+            "path_shapley_mi_main": [],
+            "path_shapley_mi_main_mean": 0.0,
+            "path_shapley_synergy_mean": 0.0,
+        }
+    
+    try:
+        from sklearn.feature_selection import mutual_info_regression
+        
+        m = scores.shape[1]
+        mi_main = np.zeros(m)
+        for j in range(m):
+            mi_main[j] = mutual_info_regression(scores[:, [j]], y, random_state=1)[0]
+        
+        # Pairwise synergy: MI([i,j]) - MI(i) - MI(j)
+        mi_pair = np.zeros((m, m))
+        for i in range(m):
+            for j in range(i+1, m):
+                s = np.stack([scores[:,i], scores[:,j]], axis=1)
+                mi_ij = mutual_info_regression(s, y, random_state=1).sum()
+                mi_pair[i,j] = mi_ij - mi_main[i] - mi_main[j]
+        
+        # Symmetrize
+        mi_pair = mi_pair + mi_pair.T
+        
+        # Compute mean synergy (only upper triangle, excluding diagonal)
+        synergy_values = []
+        for i in range(m):
+            for j in range(i+1, m):
+                if mi_pair[i,j] > 0:  # Only positive synergy
+                    synergy_values.append(mi_pair[i,j])
+        
+        return {
+            "path_shapley_mi_main": mi_main.tolist(),
+            "path_shapley_mi_main_mean": float(mi_main.mean()),
+            "path_shapley_synergy_mean": float(np.mean(synergy_values)) if len(synergy_values) > 0 else 0.0,
+        }
+    except Exception as e:
+        print(f"[path_shapley_metrics] Warning: Computation failed: {e}")
+        return {
+            "path_shapley_mi_main": [],
+            "path_shapley_mi_main_mean": 0.0,
+            "path_shapley_synergy_mean": 0.0,
+        }
+
+
+def compute_centroid_drift_metrics(
+    E_time: List[torch.Tensor],
+    k: int = 8,
+) -> Dict[str, object]:
+    """
+    Compute centroid drift and cluster radius metrics.
+    Returns JSON-serializable dictionary.
+    """
+    if not HAVE_SK or len(E_time) < 2:
+        return {
+            "centroid_drift": [],
+            "cluster_radius": [],
+        }
+    
+    try:
+        cents = []
+        radii = []
+        for E in E_time:
+            labs, C = _cluster_E(E, k=k)
+            if C is None:
+                continue
+            cents.append(C)
+            # Within-cluster variance
+            var = 0.0
+            E_np = E.numpy() if isinstance(E, torch.Tensor) else E
+            for j in range(k):
+                Xj = E_np[labs == j]
+                if Xj.size == 0:
+                    continue
+                var += ((Xj - C[j][None,:])**2).mean()
+            radii.append(var)
+        
+        if len(cents) < 2:
+            return {
+                "centroid_drift": [],
+                "cluster_radius": radii,
+            }
+        
+        cents = np.stack(cents, axis=0)   # T x k x D
+        drift = np.linalg.norm(cents[1:] - cents[:-1], axis=2).mean(axis=1)  # per step
+        
+        return {
+            "centroid_drift": drift.tolist(),
+            "cluster_radius": radii,
+        }
+    except Exception as e:
+        print(f"[centroid_drift_metrics] Warning: Computation failed: {e}")
+        return {
+            "centroid_drift": [],
+            "cluster_radius": [],
+        }
+
+
+def compute_lineage_sankey_metrics(
+    E_time: List[torch.Tensor],
+    k: int = 8,
+) -> Dict[str, object]:
+    """
+    Compute lineage Sankey flow metrics.
+    Returns JSON-serializable dictionary with flow data.
+    """
+    if not HAVE_SK or len(E_time) < 2:
+        return {
+            "lineage_flows": [],
+            "lineage_cluster_sizes": [],
+        }
+    
+    try:
+        # Cluster each time slice
+        labels_t = []
+        cents_t = []
+        for E in E_time:
+            labs, cents = _cluster_E(E, k=k)
+            if labs is None or cents is None:
+                continue
+            labels_t.append(labs)
+            cents_t.append(cents)
+        
+        if len(labels_t) < 2:
+            return {
+                "lineage_flows": [],
+                "lineage_cluster_sizes": [],
+            }
+        
+        # Align clusters across time via Hungarian on cosine distance of centroids
+        aligned = [labels_t[0]]
+        for t in range(1, len(labels_t)):
+            C_prev = cents_t[t-1]
+            C_cur = cents_t[t]
+            sim = (C_prev @ C_cur.T)
+            # Cosine normalize
+            sim /= np.linalg.norm(C_prev, axis=1, keepdims=True) + 1e-8
+            sim /= np.linalg.norm(C_cur, axis=1, keepdims=True).T + 1e-8
+            cost = 1.0 - sim
+            r, c = linear_sum_assignment(cost)
+            perm = np.argsort(c)  # map current -> aligned order
+            aligned.append(perm[labels_t[t]])
+        
+        # Build flow counts
+        flows = []
+        cluster_sizes = []
+        for t in range(len(aligned)):
+            counts = np.bincount(aligned[t], minlength=k)
+            cluster_sizes.append(counts.tolist())
+        
+        for t in range(len(aligned) - 1):
+            a = aligned[t]
+            b = aligned[t+1]
+            flow = np.zeros((k, k), dtype=int)
+            for i in range(len(a)):
+                flow[a[i], b[i]] += 1
+            flows.append(flow.tolist())
+        
+        return {
+            "lineage_flows": flows,
+            "lineage_cluster_sizes": cluster_sizes,
+        }
+    except Exception as e:
+        print(f"[lineage_sankey_metrics] Warning: Computation failed: {e}")
+        return {
+            "lineage_flows": [],
+            "lineage_cluster_sizes": [],
+        }
+
+
 # --------------------
 # Ablation waterfall
 # --------------------
@@ -1069,4 +1256,637 @@ def run_full_analysis_at_checkpoint(
     # 5) Flow centrality heatmap
     central_png = os.path.join(out_dir, f"flow_centrality_{step_tag}.png")
     flow_centrality_heatmap(model, val_loader, central_png, mode=kernel_mode)
+
+
+# ---------------------------
+# Comprehensive path kernel metrics computation
+# ---------------------------
+
+@torch.no_grad()
+def compute_path_kernel_metrics(
+    model,
+    train_loader,
+    test_loader,
+    *,
+    mode: str = "routing_gain",
+    k: int = 48,
+    max_samples: Optional[int] = 5000,
+    device: Optional[str] = None,
+) -> Dict[str, object]:
+    """
+    Compute comprehensive path kernel metrics efficiently.
+    Returns a dictionary with all metrics (scalars and lists, JSON-serializable).
+    
+    Metrics computed:
+    - effective_rank: Effective rank of path kernel
+    - top_eigenvalue: Largest eigenvalue
+    - eigenvalue_sum: Sum of top-k eigenvalues
+    - variance_explained_train: Variance explained by top-k eigenfunctions on train (sum)
+    - variance_explained_test: Variance explained by top-k eigenfunctions on test (sum)
+    - variance_explained_train_per_component: List of variance explained per eigenvalue (top 35)
+    - variance_explained_test_per_component: List of variance explained per eigenvalue (top 35)
+    - variance_explained_train_top10: Sum of top 10 components
+    - variance_explained_test_top10: Sum of top 10 components
+    """
+    from .path_kernel import compute_path_kernel_eigs
+    
+    dev = device or next(iter(model.parameters())).device
+    model.eval()
+    
+    metrics = {}
+    
+    try:
+        # Compute path kernel eigenvalues/eigenvectors for train
+        kern_train = compute_path_kernel_eigs(
+            model, train_loader, device=dev, mode=mode, include_input=True,
+            k=k, n_iter=30, block_size=1024, max_samples=max_samples, verbose=False
+        )
+        
+        # Keep tensors on GPU for computation (faster on H100)
+        evals = kern_train["evals"].to(dev) if isinstance(kern_train["evals"], torch.Tensor) else kern_train["evals"]
+        evecs = kern_train["evecs"].to(dev) if isinstance(kern_train["evecs"], torch.Tensor) else kern_train["evecs"]
+        y_train = kern_train.get("y")
+        if y_train is not None and isinstance(y_train, torch.Tensor):
+            y_train = y_train.to(dev)
+        
+        # Effective rank (compute on GPU)
+        metrics["path_kernel_effective_rank"] = _effective_rank(evals)
+        
+        # Top eigenvalue
+        metrics["path_kernel_top_eigenvalue"] = evals[0].item() if len(evals) > 0 else 0.0
+        
+        # Top 10 eigenvalues
+        top_k_evals = min(10, len(evals))
+        metrics["path_kernel_top10_eigenvalues"] = evals[:top_k_evals].cpu().numpy().tolist()
+        
+        # Sum of eigenvalues
+        metrics["path_kernel_eigenvalue_sum"] = evals.sum().item()
+        
+        # Variance explained by eigenfunctions (per component, top 35) - compute on GPU
+        if y_train is not None:
+            y_train_centered = y_train - y_train.mean()
+            y_train_var = y_train_centered.var().item()
+            if y_train_var > 1e-12:
+                y_train_norm = y_train_centered / (torch.norm(y_train_centered) + 1e-8)
+                alignments = (y_train_norm @ evecs) ** 2  # (k,) - computed on GPU
+                top_k = min(35, len(alignments))
+                # Save per-component variance explained (top 35) - move to CPU only for final conversion
+                metrics["path_kernel_variance_explained_train_per_component"] = alignments[:top_k].cpu().numpy().tolist()
+                metrics["path_kernel_variance_explained_train"] = alignments.sum().item()
+                metrics["path_kernel_variance_explained_train_top10"] = alignments[:min(10, len(alignments))].sum().item()
+            else:
+                metrics["path_kernel_variance_explained_train_per_component"] = [0.0] * min(35, len(evecs))
+                metrics["path_kernel_variance_explained_train"] = 0.0
+                metrics["path_kernel_variance_explained_train_top10"] = 0.0
+        else:
+            top_k = min(35, len(evecs))
+            metrics["path_kernel_variance_explained_train_per_component"] = [0.0] * top_k
+        
+        # Compute for test set
+        if test_loader is not None:
+            try:
+                kern_test = compute_path_kernel_eigs(
+                    model, test_loader, device=dev, mode=mode, include_input=True,
+                    k=k, n_iter=30, block_size=1024, max_samples=max_samples, verbose=False
+                )
+                y_test = kern_test.get("y")
+                if y_test is not None:
+                    y_test = y_test.to(dev)  # Keep on GPU
+                    evecs_test = kern_test["evecs"].to(dev)  # Keep on GPU
+                    y_test_centered = y_test - y_test.mean()
+                    y_test_var = y_test_centered.var().item()
+                    if y_test_var > 1e-12:
+                        y_test_norm = y_test_centered / (torch.norm(y_test_centered) + 1e-8)
+                        alignments_test = (y_test_norm @ evecs_test) ** 2  # Computed on GPU
+                        top_k = min(35, len(alignments_test))
+                        # Save per-component variance explained (top 35) - move to CPU only for final conversion
+                        metrics["path_kernel_variance_explained_test_per_component"] = alignments_test[:top_k].cpu().numpy().tolist()
+                        metrics["path_kernel_variance_explained_test"] = alignments_test.sum().item()
+                        metrics["path_kernel_variance_explained_test_top10"] = alignments_test[:min(10, len(alignments_test))].sum().item()
+                    else:
+                        top_k = min(35, len(evecs_test))
+                        metrics["path_kernel_variance_explained_test_per_component"] = [0.0] * top_k
+                        metrics["path_kernel_variance_explained_test"] = 0.0
+                        metrics["path_kernel_variance_explained_test_top10"] = 0.0
+                else:
+                    top_k = min(35, len(kern_test["evecs"]))
+                    metrics["path_kernel_variance_explained_test_per_component"] = [0.0] * top_k
+            except Exception as e:
+                print(f"[path_kernel_metrics] Warning: Test set computation failed: {e}")
+        
+    except Exception as e:
+        print(f"[path_kernel_metrics] Warning: Computation failed: {e}")
+        # Return empty dict with zeros
+        metrics = {
+            "path_kernel_effective_rank": 0.0,
+            "path_kernel_top_eigenvalue": 0.0,
+            "path_kernel_top10_eigenvalues": [0.0] * 10,
+            "path_kernel_eigenvalue_sum": 0.0,
+            "path_kernel_variance_explained_train": 0.0,
+            "path_kernel_variance_explained_test": 0.0,
+            "path_kernel_variance_explained_train_per_component": [0.0] * 35,
+            "path_kernel_variance_explained_test_per_component": [0.0] * 35,
+        }
+    
+    return metrics
+
+
+# ---------------------------
+# New analyses: variance explained, CKA, effective rank
+# ---------------------------
+
+def _effective_rank(evals: torch.Tensor) -> float:
+    """
+    Compute effective rank from eigenvalues.
+    Effective rank = exp(entropy) where entropy = -sum(p_i * log(p_i))
+    and p_i = lambda_i / sum(lambda)
+    """
+    evals = evals[evals > 0]  # Only positive eigenvalues
+    if len(evals) == 0:
+        return 0.0
+    total = evals.sum()
+    if total <= 0:
+        return 0.0
+    p = evals / total
+    p = p[p > 1e-12]  # Avoid log(0)
+    entropy = -(p * torch.log(p)).sum()
+    return torch.exp(entropy).item()
+
+
+@torch.no_grad()
+def compute_kernel_alignment_layerwise(
+    model,
+    train_loader,
+    test_loader,
+    out_path: str,
+    *,
+    mode: str = "routing_gain",
+    k: int = 48,
+    max_samples: Optional[int] = 5000,
+    title: str = "Kernel Alignment (Variance Explained)",
+):
+    """
+    Compute variance explained by path kernel eigenfunctions vs rank, layer-wise.
+    For each layer depth (1, 2, 3, ...), compute kernel using only up to that layer,
+    then compute alignment with targets on train and test sets.
+    """
+    _ensure_dir(os.path.dirname(out_path))
+    from .path_kernel import collect_path_factors, HadamardGramOperator, top_eigenpairs_block_power
+    
+    device = next(iter(model.parameters())).device
+    model.eval()
+    
+    # Collect factors for train and test
+    pack_train = collect_path_factors(model, train_loader, device, mode=mode, include_input=True, max_samples=max_samples)
+    pack_test = collect_path_factors(model, test_loader, device, mode=mode, include_input=True, max_samples=max_samples)
+    
+    L = pack_train["meta"]["depth"]
+    y_train = pack_train["y"]
+    y_test = pack_test["y"] if pack_test["y"] is not None else None
+    
+    if y_train is None:
+        print("[analysis] Warning: No targets available for kernel alignment")
+        return
+    
+    # Center targets
+    y_train_centered = y_train - y_train.mean()
+    y_train_var = y_train_centered.var().item()
+    if y_test is not None:
+        y_test_centered = y_test - y_test.mean()
+        y_test_var = y_test_centered.var().item()
+    
+    # For each layer depth, compute kernel up to that layer
+    train_alignments = []
+    test_alignments = []
+    ranks = []
+    
+    for depth in range(1, L + 1):
+        # Build factors up to depth
+        factors_train = []
+        if pack_train["X"] is not None:
+            factors_train.append(pack_train["X"])
+        factors_train.extend(pack_train["E_list"][:depth])
+        
+        factors_test = []
+        if pack_test["X"] is not None:
+            factors_test.append(pack_test["X"])
+        factors_test.extend(pack_test["E_list"][:depth])
+        
+        # Compute kernel operator
+        op_train = HadamardGramOperator(factors_train, device=device, dtype=torch.float32, block_size=1024)
+        
+        # Compute top eigenpairs
+        P_train = factors_train[0].shape[0]
+        k_actual = min(k, P_train - 1)
+        evals, evecs = top_eigenpairs_block_power(op_train, k=k_actual, n_iter=30, verbose=False)
+        
+        # Compute alignment: project targets onto eigenfunctions
+        # Variance explained = sum of (y^T @ evec_i)^2 / ||y||^2
+        y_train_norm = y_train_centered / (torch.norm(y_train_centered) + 1e-8)
+        alignments = (y_train_norm @ evecs) ** 2  # (k,)
+        var_explained_train = alignments.sum().item()
+        train_alignments.append(var_explained_train)
+        
+        if y_test is not None:
+            # Compute test kernel and align
+            op_test = HadamardGramOperator(factors_test, device=device, dtype=torch.float32, block_size=1024)
+            P_test = factors_test[0].shape[0]
+            k_test = min(k, P_test - 1)
+            evals_test, evecs_test = top_eigenpairs_block_power(op_test, k=k_test, n_iter=30, verbose=False)
+            y_test_norm = y_test_centered / (torch.norm(y_test_centered) + 1e-8)
+            alignments_test = (y_test_norm @ evecs_test) ** 2
+            var_explained_test = alignments_test.sum().item()
+            test_alignments.append(var_explained_test)
+        else:
+            test_alignments.append(0.0)
+        
+        ranks.append(depth)
+    
+    # Plot
+    plt.figure(figsize=(8, 5))
+    plt.plot(ranks, train_alignments, marker="o", label="Train", linewidth=2)
+    if y_test is not None:
+        plt.plot(ranks, test_alignments, marker="s", label="Test", linewidth=2)
+    plt.xlabel("Layer depth")
+    plt.ylabel("Variance explained (kernel alignment)")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, ls="--", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+    print(f"[analysis] saved kernel alignment layerwise -> {out_path}")
+
+
+@torch.no_grad()
+def compute_cka_initial_vs_current(
+    model_initial,
+    model_current,
+    loader,
+    out_path: str,
+    *,
+    mode: str = "routing_gain",
+    max_samples: Optional[int] = 5000,
+    title: str = "CKA: Initial vs Current Path Kernel",
+):
+    """
+    Compute Centered Kernel Alignment (CKA) between initial and current path kernels.
+    Uses efficient computation: CKA(K1, K2) = ||K1^T @ K2||_F^2 / (||K1||_F^2 * ||K2||_F^2)
+    """
+    _ensure_dir(os.path.dirname(out_path))
+    from .path_kernel import collect_path_factors, HadamardGramOperator
+    
+    device = next(iter(model_initial.parameters())).device
+    
+    # Collect factors for both models
+    pack_initial = collect_path_factors(model_initial, loader, device, mode=mode, include_input=True, max_samples=max_samples)
+    pack_current = collect_path_factors(model_current, loader, device, mode=mode, include_input=True, max_samples=max_samples)
+    
+    # Build factors
+    factors_initial = []
+    if pack_initial["X"] is not None:
+        factors_initial.append(pack_initial["X"])
+    factors_initial.extend(pack_initial["E_list"])
+    
+    factors_current = []
+    if pack_current["X"] is not None:
+        factors_current.append(pack_current["X"])
+    factors_current.extend(pack_current["E_list"])
+    
+    # Compute kernel operators
+    op_initial = HadamardGramOperator(factors_initial, device=device, dtype=torch.float32, block_size=1024)
+    op_current = HadamardGramOperator(factors_current, device=device, dtype=torch.float32, block_size=1024)
+    
+    P = factors_initial[0].shape[0]
+    # Efficient CKA computation using HSIC-like formula
+    # Sample random vectors to estimate trace products
+    n_samples = min(100, P)  # Use fewer samples for efficiency
+    indices = torch.randperm(P, device=device)[:n_samples]
+    I_sample = torch.eye(P, device=device, dtype=torch.float32)[:, indices]  # (P, n_samples)
+    
+    K1_sample = op_initial.mm(I_sample)  # (P, n_samples)
+    K2_sample = op_current.mm(I_sample)   # (P, n_samples)
+    
+    # Center kernels
+    K1_centered = K1_sample - K1_sample.mean(dim=0, keepdim=True) - K1_sample.mean(dim=1, keepdim=True) + K1_sample.mean()
+    K2_centered = K2_sample - K2_sample.mean(dim=0, keepdim=True) - K2_sample.mean(dim=1, keepdim=True) + K2_sample.mean()
+    
+    # Compute CKA using sampled approximation
+    # CKA ≈ trace(K1^T @ K2)^2 / (trace(K1^T @ K1) * trace(K2^T @ K2))
+    trace_K1K2 = torch.trace(K1_centered.T @ K2_centered)
+    trace_K1K1 = torch.trace(K1_centered.T @ K1_centered)
+    trace_K2K2 = torch.trace(K2_centered.T @ K2_centered)
+    
+    cka = (trace_K1K2 ** 2 / (trace_K1K1 * trace_K2K2 + 1e-12)).item()
+    
+    # Plot single value
+    plt.figure(figsize=(6, 4))
+    plt.bar([0], [cka], width=0.5)
+    plt.ylabel("CKA")
+    plt.ylim(0, 1)
+    plt.title(title)
+    plt.xticks([0], ["Initial vs Current"])
+    plt.grid(True, ls="--", alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+    print(f"[analysis] saved CKA -> {out_path} (value: {cka:.4f})")
+    return cka
+
+
+@torch.no_grad()
+def plot_effective_rank_vs_epoch(
+    model,
+    loader,
+    out_path: str,
+    *,
+    mode: str = "routing_gain",
+    k: int = 48,
+    max_samples: Optional[int] = 5000,
+    title: str = "Effective Rank of Path Kernel",
+):
+    """
+    Compute effective rank of path kernel.
+    Effective rank = exp(entropy) where entropy is computed from normalized eigenvalues.
+    """
+    _ensure_dir(os.path.dirname(out_path))
+    from .path_kernel import compute_path_kernel_eigs
+    
+    device = next(iter(model.parameters())).device
+    kern = compute_path_kernel_eigs(
+        model, loader, device=device, mode=mode, include_input=True,
+        k=k, n_iter=30, block_size=1024, max_samples=max_samples, verbose=False
+    )
+    
+    evals = kern["evals"]
+    eff_rank = _effective_rank(evals)
+    
+    # Plot effective rank
+    plt.figure(figsize=(6, 4))
+    plt.bar([0], [eff_rank], width=0.5)
+    plt.ylabel("Effective Rank")
+    plt.title(title)
+    plt.xticks([0], ["Path Kernel"])
+    plt.grid(True, ls="--", alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+    print(f"[analysis] saved effective rank -> {out_path} (value: {eff_rank:.2f})")
+    return eff_rank
+
+
+@torch.no_grad()
+def plot_variance_explained_vs_rank(
+    model,
+    train_loader,
+    test_loader,
+    out_path: str,
+    *,
+    mode: str = "routing_gain",
+    k: int = 48,
+    max_samples: Optional[int] = 5000,
+    title: str = "Variance Explained vs Eigenvalue Rank",
+):
+    """
+    Plot variance explained by top-k eigenfunctions vs rank on train and test sets.
+    """
+    _ensure_dir(os.path.dirname(out_path))
+    from .path_kernel import compute_path_kernel_eigs
+    
+    device = next(iter(model.parameters())).device
+    
+    # Compute kernels for train and test
+    kern_train = compute_path_kernel_eigs(
+        model, train_loader, device=device, mode=mode, include_input=True,
+        k=k, n_iter=30, block_size=1024, max_samples=max_samples, verbose=False
+    )
+    
+    kern_test = compute_path_kernel_eigs(
+        model, test_loader, device=device, mode=mode, include_input=True,
+        k=k, n_iter=30, block_size=1024, max_samples=max_samples, verbose=False
+    )
+    
+    # Get targets
+    y_train = kern_train.get("y")
+    y_test = kern_test.get("y")
+    
+    if y_train is None:
+        print("[analysis] Warning: No targets available for variance explained plot")
+        return
+    
+    # Center targets
+    y_train_centered = y_train - y_train.mean()
+    y_train_var = y_train_centered.var()
+    
+    # Project targets onto eigenfunctions
+    evecs_train = kern_train["evecs"]  # (P_train, k)
+    y_train_norm = y_train_centered / (torch.norm(y_train_centered) + 1e-8)
+    alignments_train = (y_train_norm @ evecs_train) ** 2  # (k,)
+    var_explained_train = torch.cumsum(alignments_train, dim=0)  # Cumulative
+    
+    var_explained_test = None
+    if y_test is not None:
+        y_test_centered = y_test - y_test.mean()
+        y_test_var = y_test_centered.var()
+        y_test_norm = y_test_centered / (torch.norm(y_test_centered) + 1e-8)
+        # Project onto test eigenfunctions
+        evecs_test = kern_test["evecs"]
+        alignments_test = (y_test_norm @ evecs_test) ** 2
+        var_explained_test = torch.cumsum(alignments_test, dim=0)
+    
+    # Plot
+    ranks = np.arange(1, k + 1)
+    plt.figure(figsize=(8, 5))
+    plt.plot(ranks, var_explained_train.cpu().numpy(), marker="o", label="Train", linewidth=2, markersize=4)
+    if var_explained_test is not None:
+        plt.plot(ranks, var_explained_test.cpu().numpy(), marker="s", label="Test", linewidth=2, markersize=4)
+    plt.xlabel("Eigenvalue rank")
+    plt.ylabel("Cumulative variance explained")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, ls="--", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+    print(f"[analysis] saved variance explained vs rank -> {out_path}")
+
+
+# ---------------------------
+# Checkpoint-based metrics computation
+# ---------------------------
+
+@torch.no_grad()
+def compute_checkpoint_metrics(
+    model,
+    loader,
+    *,
+    mode: str = "routing_gain",
+    max_samples: Optional[int] = 5000,
+    device: Optional[str] = None,
+    k_clusters: int = 8,
+) -> Dict[str, object]:
+    """
+    Compute checkpoint-based metrics that can be computed at a single checkpoint.
+    Returns JSON-serializable metrics.
+    
+    Metrics computed:
+    - path_shapley_main: Main mutual information effects for top eigenfunctions
+    - path_shapley_synergy_mean: Mean pairwise synergy
+    - circuit_overlap_matrix: Cosine similarity matrix between cluster centroids
+    - circuit_overlap_mean: Mean overlap (excluding diagonal)
+    """
+    if not HAVE_SK:
+        return {}
+    
+    dev = device or next(iter(model.parameters())).device
+    model.eval()
+    
+    metrics = {}
+    
+    try:
+        # Get path embeddings
+        Epack = path_embedding(model, loader, device=dev, mode=mode, normalize=True, max_samples=max_samples)
+        E = Epack["E"]  # (P, D)
+        y = Epack.get("labels") or Epack.get("y")
+        
+        if y is None:
+            return metrics
+        
+        E_np = E.numpy()
+        y_np = y.numpy()
+        
+        # Path-Shapley: Use top eigenfunctions of path kernel
+        from .path_kernel import compute_path_kernel_eigs
+        kern = compute_path_kernel_eigs(
+            model, loader, device=dev, mode=mode, include_input=True,
+            k=min(24, E.shape[0] - 1), n_iter=30, block_size=1024, max_samples=max_samples, verbose=False
+        )
+        evecs = kern.get("evecs")
+        if evecs is not None:
+            evecs_np = evecs.detach().cpu().numpy()  # (P, k)
+            top_m = min(24, evecs_np.shape[1])
+            scores = evecs_np[:, :top_m]
+            
+            # Compute Path-Shapley metrics
+            from sklearn.feature_selection import mutual_info_regression
+            
+            # Main effects
+            mi_main = np.zeros(top_m)
+            for j in range(top_m):
+                mi_main[j] = mutual_info_regression(scores[:, [j]], y_np, random_state=1)[0]
+            
+            # Pairwise synergy
+            mi_pair = np.zeros((top_m, top_m))
+            for i in range(top_m):
+                for j in range(i+1, top_m):
+                    s = np.stack([scores[:,i], scores[:,j]], axis=1)
+                    mi_ij = mutual_info_regression(s, y_np, random_state=1).sum()
+                    mi_pair[i,j] = mi_ij - mi_main[i] - mi_main[j]
+            
+            metrics["path_shapley_main"] = mi_main.tolist()
+            metrics["path_shapley_main_mean"] = float(mi_main.mean())
+            metrics["path_shapley_main_max"] = float(mi_main.max())
+            # Average positive synergy
+            positive_synergy = mi_pair[mi_pair > 0]
+            metrics["path_shapley_synergy_mean"] = float(positive_synergy.mean()) if len(positive_synergy) > 0 else 0.0
+            metrics["path_shapley_synergy_max"] = float(mi_pair.max())
+        
+        # Circuit Overlap: Cluster embeddings and compute overlap
+        if E_np.shape[0] > k_clusters:
+            from sklearn.cluster import KMeans
+            k_actual = min(k_clusters, E_np.shape[0] - 1, E_np.shape[0] // 10)
+            if k_actual >= 2:
+                km = KMeans(n_clusters=k_actual, random_state=1, n_init="auto")
+                km.fit(E_np)
+                prototypes = km.cluster_centers_  # (k, D)
+                
+                # Compute cosine similarity matrix
+                P = prototypes
+                num = P @ P.T
+                norms = np.linalg.norm(P, axis=1, keepdims=True) + 1e-8
+                S = num / (norms * norms.T)
+                
+                # Mean overlap (excluding diagonal)
+                mask = ~np.eye(S.shape[0], dtype=bool)
+                metrics["circuit_overlap_mean"] = float(S[mask].mean())
+                metrics["circuit_overlap_max"] = float(S[mask].max())
+                metrics["circuit_overlap_min"] = float(S[mask].min())
+                metrics["circuit_overlap_std"] = float(S[mask].std())
+                # Store full matrix as list of lists (for JSON)
+                metrics["circuit_overlap_matrix"] = S.tolist()
+        
+    except Exception as e:
+        print(f"[checkpoint_metrics] Warning: Failed to compute metrics: {e}")
+    
+    return metrics
+
+
+@torch.no_grad()
+def compute_lineage_centroid_metrics(
+    E_time: List[torch.Tensor],
+    *,
+    k: int = 8,
+) -> Dict[str, object]:
+    """
+    Compute metrics from multiple checkpoints for Lineage Sankey and Centroid Drift.
+    Requires multiple checkpoints (E_time list).
+    
+    Returns:
+    - centroid_drift: List of drift values between consecutive checkpoints
+    - centroid_drift_mean: Mean drift
+    - cluster_radius: List of within-cluster variance at each checkpoint
+    - cluster_radius_mean: Mean cluster radius
+    """
+    if not HAVE_SK or len(E_time) < 2:
+        return {}
+    
+    from sklearn.cluster import KMeans
+    
+    metrics = {}
+    
+    try:
+        cents = []
+        radii = []
+        
+        for E in E_time:
+            E_np = E.numpy() if isinstance(E, torch.Tensor) else E
+            if E_np.shape[0] < k:
+                continue
+            
+            k_actual = min(k, E_np.shape[0] - 1)
+            if k_actual < 2:
+                continue
+            
+            km = KMeans(n_clusters=k_actual, random_state=1, n_init="auto")
+            labs = km.fit_predict(E_np)
+            C = km.cluster_centers_
+            cents.append(C)
+            
+            # Within-cluster variance
+            var = 0.0
+            for j in range(k_actual):
+                Xj = E_np[labs == j]
+                if Xj.size == 0:
+                    continue
+                var += ((Xj - C[j][None,:])**2).mean()
+            radii.append(var)
+        
+        if len(cents) < 2:
+            return {}
+        
+        # Compute drift
+        cents_array = np.stack(cents, axis=0)  # T x k x D
+        drift = np.linalg.norm(cents_array[1:] - cents_array[:-1], axis=2).mean(axis=1)  # per step
+        
+        metrics["centroid_drift"] = drift.tolist()
+        metrics["centroid_drift_mean"] = float(drift.mean())
+        metrics["centroid_drift_max"] = float(drift.max())
+        metrics["cluster_radius"] = radii
+        metrics["cluster_radius_mean"] = float(np.mean(radii))
+        metrics["cluster_radius_max"] = float(np.max(radii))
+        
+    except Exception as e:
+        print(f"[lineage_metrics] Warning: Failed to compute metrics: {e}")
+    
+    return metrics
 

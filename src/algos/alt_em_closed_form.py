@@ -1,8 +1,8 @@
 from __future__ import annotations
 import torch
 from .pruning import prune_identity_like
-from ..utils.metrics import slope_budget, slope_entropy, slope_deviation, effective_rank, gate_stats, compute_path_metrics
 from ..utils.lsq import stable_lstsq
+# Removed: from ..utils.metrics import compute_path_metrics
 
 # ---------------------- utilities ----------------------
 
@@ -254,10 +254,9 @@ def train_alt_em_closed_form(model, full_train_loader, val_loader, config, test_
     cycles = int(alt_cfg.get("cycles", t.get("cycles", 50)))
     
     # Computation frequency controls (for speed optimization)
-    # NOTE: Path metrics are ALWAYS computed every cycle for alternating EM (only 100 cycles, need full detail)
     logging_cfg = config.get("logging", {})
-    effective_rank_freq = int(logging_cfg.get("effective_rank_every_n_cycles", 1))
-    path_analysis_freq = int(logging_cfg.get("path_analysis_every_n_cycles", 10))  # Default: every 10 cycles
+    path_kernel_metrics_freq = int(logging_cfg.get("path_kernel_metrics_every_n_cycles", 1))  # Compute path kernel metrics every cycle by default
+    path_analysis_freq = path_kernel_metrics_freq  # Use same frequency as path kernel metrics
     path_analysis_out_dir = config.get("path_analysis_out_dir", None)  # Output directory for path analysis plots
     ridge_a = float(alt_cfg.get("ridge_a", t.get("ridge_a", 1.0)))     
     ridge_w = float(alt_cfg.get("ridge_w", t.get("ridge_w", 10.0)))    
@@ -287,7 +286,9 @@ def train_alt_em_closed_form(model, full_train_loader, val_loader, config, test_
 
     history = []
     prev_masks = None
-    prev_path_hashes = None  # Track path hashes for confident churn
+    # Checkpoint embeddings for lineage/centroid metrics
+    checkpoint_embeddings = []  # List of (cycle, embedding_tensor) tuples
+    checkpoint_metrics_history = []  # List of checkpoint metrics dicts
 
     import time as time_module
     cycle_start_time = time_module.time()
@@ -407,63 +408,40 @@ def train_alt_em_closed_form(model, full_train_loader, val_loader, config, test_
             if p.get("enabled") and cyc >= p.get("apply_after_cycles", 5):
                  p_stats = prune_identity_like(model, tau=float(p.get("tau", 0.02)))
 
-            # Slopes metrics
-            B_total = B_layers = H_total = None
-            gate_stats_dict = None
-            eff_ranks = []
-            path_metrics = None
-            if getattr(model, "use_gates", False):
-                slopes = model.layer_slopes()
-                B_total, B_layers = slope_budget(slopes)
-                H_total, _ = slope_entropy(slopes)
-                gate_stats_dict = gate_stats(slopes)
-                
-                # Compute path metrics - cache loader to avoid recreating
-                if not hasattr(train_alt_em_closed_form, '_path_loader_cache'):
-                    from torch.utils.data import DataLoader
-                    train_alt_em_closed_form._path_loader_cache = DataLoader(
-                        full_train_loader.dataset, batch_size=len(full_train_loader.dataset), shuffle=False
+            # Compute path kernel metrics (effective rank, variance explained, etc.)
+            path_kernel_metrics = {}
+            if (cyc % path_kernel_metrics_freq == 0) or (cyc == 1) or (cyc == cycles):
+                try:
+                    from ..analysis.path_analysis import compute_path_kernel_metrics
+                    path_kernel_metrics = compute_path_kernel_metrics(
+                        model,
+                        full_train_loader,
+                        test_loader if test_loader is not None else val_loader,
+                        mode="routing_gain",
+                        k=48,
+                        max_samples=5000,
+                        device=device,
                     )
-                path_loader = train_alt_em_closed_form._path_loader_cache
-                
-                # Extract group_ids if available (for SEI computation)
-                group_ids = None
-                n_groups = None
-                if hasattr(full_train_loader.dataset, 'get_group_ids'):
-                    group_ids = full_train_loader.dataset.get_group_ids()
-                    if group_ids is not None:
-                        # Get n_groups from dataset or config
-                        if hasattr(full_train_loader.dataset, 'n_groups'):
-                            n_groups = full_train_loader.dataset.n_groups
-                        else:
-                            # Try to infer from group_ids
-                            n_groups = int(group_ids.max() + 1) if len(group_ids) > 0 else None
-                
-                path_metrics = compute_path_metrics(
-                    model, path_loader, device=device,
-                    prev_masks=prev_masks,
-                    prev_path_hashes=prev_path_hashes,
-                    return_masks=False,
-                    return_path_hashes=True,  # Need path hashes for next cycle
-                    group_ids=group_ids, n_groups=n_groups
-                )
-                # Update prev_path_hashes for next cycle
-                if path_metrics is not None and "cur_path_hashes" in path_metrics:
-                    prev_path_hashes = path_metrics["cur_path_hashes"]
-            
-            # Compute effective ranks from activations - SVD is expensive, compute less frequently
-            if (cyc % effective_rank_freq == 0) or (cyc == 1) or (cyc == cycles):
-                _, _, _, hs, _ = _forward_cache(model, Xfull)
-                eff_ranks = [effective_rank(h) for h in hs]  # SVD works on GPU
-            else:
-                eff_ranks = None  # Skip expensive SVD computation
+                except Exception as e:
+                    print(f"  [path_kernel_metrics] Warning: Failed at cycle {cyc}: {e}")
 
-            print(f"Cyc {cyc} | TrL: {tr_loss:.4f} | VaL: {va_loss:.4f} | Churn: {max_churn:.3f} | BetaW: {beta_w:.4f} | BetaA: {beta_a:.4f} | Bdgt: {B_total if B_total else 0:.2f}")
+            # Path metrics removed - no longer computing standard path metrics
+
+            print(f"Cyc {cyc} | TrL: {tr_loss:.4f} | VaL: {va_loss:.4f} | Churn: {max_churn:.3f} | BetaW: {beta_w:.4f} | BetaA: {beta_a:.4f}")
 
             # Run path analysis at intervals (start, end, and every N cycles)
+            checkpoint_metrics = {}
             if path_analysis_out_dir is not None and ((cyc % path_analysis_freq == 0) or (cyc == 1) or (cyc == cycles)):
                 try:
-                    from ..analysis.path_analysis import run_full_analysis_at_checkpoint
+                    from ..analysis.path_analysis import (
+                        run_full_analysis_at_checkpoint,
+                        path_embedding,
+                        compute_path_shapley_metrics,
+                        compute_centroid_drift_metrics,
+                        compute_lineage_sankey_metrics,
+                    )
+                    from ..analysis.path_kernel import compute_path_kernel_eigs
+                    
                     run_full_analysis_at_checkpoint(
                         model=model,
                         val_loader=val_loader,
@@ -476,63 +454,101 @@ def train_alt_em_closed_form(model, full_train_loader, val_loader, config, test_
                         max_samples_kernel=5000,  # Limit samples for speed
                         max_samples_embed=5000,
                     )
+                    
+                    # Collect checkpoint embeddings for lineage/centroid metrics
+                    try:
+                        Epack = path_embedding(
+                            model, val_loader, device=device, mode="routing_gain",
+                            normalize=True, max_samples=5000
+                        )
+                        E_tensor = Epack["E"]
+                        # Safely get y_data - avoid boolean evaluation of tensors
+                        y_data = Epack.get("labels")
+                        if y_data is None:
+                            y_data = Epack.get("y")
+                        
+                        checkpoint_embeddings.append((cyc, E_tensor.detach().cpu()))
+                        
+                        # Compute Path-Shapley if we have kernel eigenvectors
+                        if y_data is not None and (not isinstance(y_data, torch.Tensor) or y_data.numel() > 0):
+                            try:
+                                kern = compute_path_kernel_eigs(
+                                    model, val_loader, device=device, mode="routing_gain",
+                                    include_input=True, k=24, n_iter=30, block_size=1024,
+                                    max_samples=5000, verbose=False
+                                )
+                                if "evecs" in kern:
+                                    evecs = kern["evecs"].detach().cpu().numpy()
+                                    y_np = y_data.numpy() if isinstance(y_data, torch.Tensor) else y_data
+                                    top_m = min(24, evecs.shape[1])
+                                    scores = evecs[:, :top_m]
+                                    shapley_metrics = compute_path_shapley_metrics(scores, y_np)
+                                    checkpoint_metrics.update(shapley_metrics)
+                            except Exception as e:
+                                print(f"  [checkpoint_metrics] Path-Shapley failed: {e}")
+                    except Exception as e:
+                        print(f"  [checkpoint_metrics] Embedding collection failed: {e}")
+                    
                     print(f"  [path_analysis] Completed for cycle {cyc}")
                 except Exception as e:
                     print(f"  [path_analysis] Warning: Failed at cycle {cyc}: {e}")
+            
+            # Compute centroid drift and lineage metrics from collected embeddings
+            if len(checkpoint_embeddings) >= 2:
+                try:
+                    from ..analysis.path_analysis import (
+                        compute_centroid_drift_metrics,
+                        compute_lineage_sankey_metrics,
+                    )
+                    E_time = [E for _, E in checkpoint_embeddings]
+                    drift_metrics = compute_centroid_drift_metrics(E_time, k=8)
+                    lineage_metrics = compute_lineage_sankey_metrics(E_time, k=8)
+                    checkpoint_metrics.update(drift_metrics)
+                    checkpoint_metrics.update(lineage_metrics)
+                except Exception as e:
+                    print(f"  [checkpoint_metrics] Drift/Lineage computation failed: {e}")
+            
+            if checkpoint_metrics:
+                checkpoint_metrics_history.append({
+                    "cycle": cyc,
+                    **checkpoint_metrics
+                })
 
             hist_entry = {
                 "cycle": cyc,
                 "train_loss": tr_loss,
                 "val_loss": va_loss,
-                "slope_budget": B_total,
                 "mask_churn": churn_layers,
                 "max_churn": max_churn,
                 "beta_w": beta_w,
                 "beta_a": beta_a,
                 "pruning": p_stats,
-                "effective_rank_layers": eff_ranks,
-                "gate_stats": gate_stats_dict
             }
-            # Add path metrics if computed
-            if path_metrics is not None:
-                hist_entry.update({
-                    "path_pressure_layers": path_metrics.get("path_pressure_layers"),
-                    "path_entropy_layers": path_metrics.get("path_entropy_layers"),
-                    "active_path_complexity": path_metrics.get("active_path_complexity"),
-                    "snr_max_layers": path_metrics.get("snr_max_layers"),
-                    "snr_p95_layers": path_metrics.get("snr_p95_layers"),
-                    "churn_active_layers": path_metrics.get("churn_active_layers"),
-                    "sei_layers": path_metrics.get("sei_layers"),
-                    # New path-centric metrics
-                    "H_path": path_metrics.get("H_path"),
-                    "H_gain": path_metrics.get("H_gain"),
-                    "I_layers": path_metrics.get("I_layers"),
-                    "confident_churn_layers": path_metrics.get("confident_churn_layers"),
-                    "path_snr_count_above_threshold": path_metrics.get("path_snr_count_above_threshold"),
-                    "path_snr_threshold": path_metrics.get("path_snr_threshold"),
-                    "path_snr_num_paths": path_metrics.get("path_snr_num_paths"),
-                    # Path SNR components: c_gamma (label correlation) - mean, median, std
-                    "path_snr_c_gamma_mean": path_metrics.get("path_snr_c_gamma_mean"),
-                    "path_snr_c_gamma_median": path_metrics.get("path_snr_c_gamma_median"),
-                    "path_snr_c_gamma_std": path_metrics.get("path_snr_c_gamma_std"),
-                    # Path SNR components: N_gamma (sample support) - mean, median, std
-                    "path_snr_N_gamma_mean": path_metrics.get("path_snr_N_gamma_mean"),
-                    "path_snr_N_gamma_median": path_metrics.get("path_snr_N_gamma_median"),
-                    "path_snr_N_gamma_std": path_metrics.get("path_snr_N_gamma_std"),
-                    "path_snr_N_gamma_total": path_metrics.get("path_snr_N_gamma_total"),
-                    # Path SNR components: SNR_gamma (signal-to-noise ratio) - mean, median, std
-                    "path_snr_SNR_gamma_mean": path_metrics.get("path_snr_SNR_gamma_mean"),
-                    "path_snr_SNR_gamma_median": path_metrics.get("path_snr_SNR_gamma_median"),
-                    "path_snr_SNR_gamma_std": path_metrics.get("path_snr_SNR_gamma_std"),
-                    "nri": path_metrics.get("nri"),
-                })
+            # Add path kernel metrics
+            if path_kernel_metrics:
+                hist_entry.update(path_kernel_metrics)
+            # Add checkpoint metrics
+            if checkpoint_metrics:
+                hist_entry.update(checkpoint_metrics)
             history.append(hist_entry)
 
             if tr_loss < 1e-4:
                 print("Converged.")
                 break
-
-    return history
+    
+    # Save checkpoint metrics history to JSON if available
+    if checkpoint_metrics_history:
+        try:
+            from ..utils.save_io import save_json
+            import os
+            # Save to the same directory as training_history.csv
+            # We'll need to get the output directory from config or return it
+            # For now, we'll return it as part of history metadata
+            pass  # Will be saved in run_experiment.py
+        except Exception as e:
+            print(f"  [checkpoint_metrics] Warning: Could not save checkpoint metrics: {e}")
+    
+    return history, checkpoint_metrics_history
 
 
 # --- Helpers (kept same) ---

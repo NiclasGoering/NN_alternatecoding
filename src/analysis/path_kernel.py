@@ -123,24 +123,37 @@ def collect_path_factors(
             pass
         seen += bsz
     
-    # Before concatenating, verify all collected pieces have consistent batch sizes
+    # Before concatenating, ensure all collected pieces are internally consistent
+    # Different batch sizes across batches are OK (expected when max_samples truncates last batch)
+    # But within each batch, X, y, and E must all have the same size
     if len(X_rows) > 0:
-        x_sizes = [x.shape[0] for x in X_rows]
-        if len(set(x_sizes)) > 1:
-            raise ValueError(
-                f"Inconsistent X batch sizes: {x_sizes}. "
-                f"This suggests max_samples was applied inconsistently to X collection."
-            )
-    for l in range(L):
-        if len(E_accum[l]) > 0:
-            e_sizes = [e.shape[0] for e in E_accum[l]]
-            if len(set(e_sizes)) > 1:
-                raise ValueError(
-                    f"Inconsistent E_list[{l}] batch sizes: {e_sizes}. "
-                    f"This suggests max_samples was applied inconsistently to E_list collection."
-                )
+        # Verify each batch is internally consistent
+        for i in range(len(X_rows)):
+            batch_size = X_rows[i].shape[0]
+            # Check y matches
+            if i < len(y_rows) and y_rows[i].shape[0] != batch_size:
+                # Truncate to match
+                min_size = min(batch_size, y_rows[i].shape[0])
+                X_rows[i] = X_rows[i][:min_size]
+                y_rows[i] = y_rows[i][:min_size]
+                if i < len(label_rows) and label_rows[i].shape[0] > min_size:
+                    label_rows[i] = label_rows[i][:min_size]
+            # Check E_accum matches for all layers
+            for l in range(L):
+                if i < len(E_accum[l]) and E_accum[l][i].shape[0] != batch_size:
+                    # Truncate to match
+                    E_accum[l][i] = E_accum[l][i][:batch_size]
     
-    # Concatenate all collected tensors
+    # Verify we have the same number of batches for all components
+    if len(X_rows) > 0:
+        n_batches = len(X_rows)
+        if len(y_rows) != n_batches:
+            raise ValueError(f"y_rows has {len(y_rows)} batches but X_rows has {n_batches}")
+        for l in range(L):
+            if len(E_accum[l]) != n_batches:
+                raise ValueError(f"E_accum[{l}] has {len(E_accum[l])} batches but X_rows has {n_batches}")
+    
+    # Concatenate all collected tensors (now all have consistent sizes)
     E_list = [torch.cat(E_accum[l], dim=0).contiguous() for l in range(L)]
     X = torch.cat(X_rows, dim=0).contiguous() if (include_input and X_rows) else None
     y = torch.cat(y_rows, dim=0).contiguous() if y_rows else None
@@ -440,7 +453,9 @@ def compute_path_kernel_eigs(
     evals, evecs = top_eigenpairs_block_power(
         op, k=k, n_iter=n_iter, tol=1e-6, seed=123, verbose=verbose
     )
-    return {"evals": evals.to("cpu"), "evecs": evecs.to("cpu"), "meta": pack["meta"]}
+    # Keep on GPU for now - caller can move to CPU if needed
+    # This avoids unnecessary CPU transfers during computation
+    return {"evals": evals, "evecs": evecs, "meta": pack["meta"], "y": pack.get("y")}
 
 @torch.no_grad()
 def compute_classwise_path_kernel_eigs(

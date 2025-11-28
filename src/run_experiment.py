@@ -9,7 +9,6 @@ from queue import Queue, Empty
 from .utils.config   import load_config
 from .utils.seed     import set_seed
 from .utils.save_io  import ensure_dir, save_json, save_csv, save_model
-from .utils.metrics  import slope_budget, slope_entropy, slope_deviation  # (mask_churn is in utils/metrics now)
 from .data.models.ffnn import GatedMLP
 
 # Parity dataset (default)
@@ -146,14 +145,27 @@ def run_algorithm(
     print(f"\n{'='*60}\nRunning {algo_name}\n{'='*60}")
 
     # Train (pass test_loader for potential early stopping)
+    checkpoint_metrics_history = []
     if algo_name == "sgd_relu":
         hist = train_sgd_relu(model, train_loader, val_loader, train_cfg, test_loader=test_loader)
     elif algo_name == "alt_em_sgd":
-        hist = train_alt_em_sgd(model, train_loader, val_loader, train_cfg, test_loader=test_loader)
+        result = train_alt_em_sgd(model, train_loader, val_loader, train_cfg, test_loader=test_loader)
+        if isinstance(result, tuple) and len(result) == 2:
+            hist, checkpoint_metrics_history = result
+        else:
+            hist = result
     elif algo_name == "alt_em_closed_form":
-        hist = train_alt_em_closed_form(model, full_train_loader, val_loader, train_cfg, test_loader=test_loader)
+        result = train_alt_em_closed_form(model, full_train_loader, val_loader, train_cfg, test_loader=test_loader)
+        if isinstance(result, tuple) and len(result) == 2:
+            hist, checkpoint_metrics_history = result
+        else:
+            hist = result
     elif algo_name == "sgd_joint":
-        hist = train_sgd_joint(model, train_loader, val_loader, train_cfg, test_loader=test_loader)
+        result = train_sgd_joint(model, train_loader, val_loader, train_cfg, test_loader=test_loader)
+        if isinstance(result, tuple) and len(result) == 2:
+            hist, checkpoint_metrics_history = result
+        else:
+            hist = result
     else:
         raise ValueError(f"Unknown algo={algo_name}")
 
@@ -175,38 +187,20 @@ def run_algorithm(
     }
 
     # Pull selected statistics from the final history entry (if provided by the trainer)
+    # Only keep basic metrics (no path metrics, no slope metrics)
     if hist and len(hist) > 0:
         last = hist[-1]
-        # slope summaries
-        if last.get("slope_budget_total") is not None:
-            final_metrics["final_slope_budget_total"]  = last["slope_budget_total"]
-            final_metrics["final_slope_budget_layers"] = last.get("slope_budget_layers")
-        if last.get("slope_entropy_total") is not None:
-            final_metrics["final_slope_entropy_total"]  = last["slope_entropy_total"]
-            final_metrics["final_slope_entropy_layers"] = last.get("slope_entropy_layers")
-        if last.get("slope_deviation_layers") is not None:
-            final_metrics["final_slope_deviation_layers"] = last["slope_deviation_layers"]
-        # mask churn / path churn
-        if last.get("mask_churn_layers") is not None:
-            final_metrics["final_mask_churn_layers"] = last["mask_churn_layers"]
-        if last.get("churn_active_layers") is not None:
-            final_metrics["final_churn_active_layers"] = last["churn_active_layers"]
-        # activations / ranks
+        # Only keep effective rank if present (basic activation metric)
         if last.get("effective_rank_layers") is not None:
             final_metrics["final_effective_rank_layers"] = last["effective_rank_layers"]
-        # gate taxonomy
-        if last.get("gate_stats") is not None:
-            final_metrics["final_gate_stats"] = last["gate_stats"]
-        # path / race metrics
-        for k in ["path_pressure_layers", "path_entropy_layers",
-                  "active_path_complexity", "snr_max_layers",
-                  "snr_p95_layers", "sei_layers"]:
-            if last.get(k) is not None:
-                final_metrics[f"final_{k}"] = last[k]
 
     # Persist
     save_json(final_metrics, os.path.join(algo_dir, "final_metrics.json"))
     save_csv(hist,            os.path.join(algo_dir, "training_history.csv"))
+    
+    # Save checkpoint metrics history if available
+    if checkpoint_metrics_history:
+        save_json(checkpoint_metrics_history, os.path.join(algo_dir, "checkpoint_metrics.json"))
 
     # Also save losses.json for fast plotting
     train_losses = [h.get("train_loss", None) for h in hist]

@@ -1,8 +1,13 @@
 from __future__ import annotations
 import torch
 from torch import optim
-from ..utils.metrics import mse_loss, slope_budget, slope_entropy, slope_deviation, effective_rank, gate_stats, compute_path_metrics
 from .pruning import prune_identity_like
+# Removed: from ..utils.metrics import compute_path_metrics
+
+# Local utility function
+def mse_loss(yhat, y):
+    """Mean squared error loss."""
+    return torch.mean((yhat - y) ** 2)
 
 @torch.no_grad()
 def eval_loader(model, loader, device):
@@ -35,25 +40,6 @@ def dataset_masks(model, loader, device):
     # Move to CPU only at the end
     return [m.cpu() for m in masks] if masks is not None else None
 
-@torch.no_grad()
-def compute_effective_ranks(model, loader, device):
-    """Compute effective rank for each layer's hidden activations."""
-    model.eval()
-    activations_list = None
-    for xb, _ in loader:
-        xb = xb.to(device)
-        _, cache = model(xb, return_cache=True)
-        batch_activations = [h for h in cache["h"]]  # Keep on GPU
-        if activations_list is None:
-            activations_list = [act.clone() for act in batch_activations]
-        else:
-            for l in range(len(activations_list)):
-                activations_list[l] = torch.cat([activations_list[l], batch_activations[l]], dim=0)
-        break  # Use first batch for efficiency
-    if activations_list is None:
-        return []
-    # Move to CPU only for effective_rank computation (which uses SVD)
-    return [effective_rank(act.cpu()) for act in activations_list]
 
 def mask_churn(prev_masks, cur_masks):
     if prev_masks is None: return [0.0]*len(cur_masks)
@@ -74,10 +60,9 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
     lam = float(r["lambda_identity"]) if r["identity_reg"] else 0.0
     
     # Computation frequency controls (for speed optimization)
-    # NOTE: Path metrics are ALWAYS computed every cycle for alternating EM (only 100 cycles, need full detail)
     logging_cfg = config.get("logging", {})
-    effective_rank_freq = int(logging_cfg.get("effective_rank_every_n_cycles", 1))
-    path_analysis_freq = int(logging_cfg.get("path_analysis_every_n_cycles", 10))  # Default: every 10 cycles
+    path_kernel_metrics_freq = int(logging_cfg.get("path_kernel_metrics_every_n_cycles", 1))  # Compute path kernel metrics every cycle by default
+    path_analysis_freq = path_kernel_metrics_freq  # Use same frequency as path kernel metrics
     path_analysis_out_dir = config.get("path_analysis_out_dir", None)  # Output directory for path analysis plots
 
     model.to(device)
@@ -85,6 +70,9 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
     prev_masks = None  # For regular churn (from train_loader, first batch only)
     prev_masks_path_metrics = None  # For path metrics (from path_loader, full dataset)
     prev_path_hashes = None  # Track path hashes for confident churn
+    # Checkpoint embeddings for lineage/centroid metrics
+    checkpoint_embeddings = []  # List of (cycle, embedding_tensor) tuples
+    checkpoint_metrics_history = []  # List of checkpoint metrics dicts
     
     import time as time_module
     cycle_start_time = time_module.time()
@@ -148,86 +136,26 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
         tr_acc, tr_loss = eval_loader(model, train_loader, device)
         va_acc, va_loss = eval_loader(model, val_loader, device)
 
-        if getattr(model, "use_gates", False):
-            slopes = model.layer_slopes()
-            B_total, B_layers = slope_budget(slopes)
-            H_total, H_layers = slope_entropy(slopes)
-            deltas = slope_deviation(slopes)
-            gate_stats_dict = gate_stats(slopes)
-            # Effective rank uses SVD - compute less frequently for speed
-            if (cyc % effective_rank_freq == 0) or (cyc == 1) or (cyc == cycles):
-                eff_ranks = compute_effective_ranks(model, train_loader, device)
-            else:
-                eff_ranks = None  # Skip expensive SVD computation
-            
-            # Compute path metrics (using full_train_loader for complete dataset)
-            # NOTE: For alternating EM, we ALWAYS compute full path metrics every cycle (only 100 cycles, need full detail)
-            # Create a non-shuffled loader for path metrics - cache it to avoid recreating
-            # BUT: Check if cached loader matches current dataset to avoid cross-run contamination
-            from torch.utils.data import DataLoader
-            current_dataset = train_loader.dataset
-            current_dataset_size = len(current_dataset)
-            
-            # Check if we need to recreate the cache
-            need_new_cache = True
-            if hasattr(train_alt_em_sgd, '_path_loader_cache'):
-                cached_loader = train_alt_em_sgd._path_loader_cache
-                # Check if cached loader's dataset is the same object and size
-                if (hasattr(cached_loader, 'dataset') and 
-                    cached_loader.dataset is current_dataset and
-                    len(cached_loader.dataset) == current_dataset_size):
-                    need_new_cache = False
-            
-            if need_new_cache:
-                train_alt_em_sgd._path_loader_cache = DataLoader(
-                    current_dataset, batch_size=current_dataset_size, shuffle=False
+        # Compute path kernel metrics (effective rank, variance explained, etc.)
+        path_kernel_metrics = {}
+        if (cyc % path_kernel_metrics_freq == 0) or (cyc == 1) or (cyc == cycles):
+            try:
+                from ..analysis.path_analysis import compute_path_kernel_metrics
+                # Use test_loader if available, otherwise val_loader
+                test_loader_for_metrics = test_loader if test_loader is not None else val_loader
+                path_kernel_metrics = compute_path_kernel_metrics(
+                    model,
+                    train_loader,
+                    test_loader_for_metrics,
+                    mode="routing_gain",
+                    k=48,
+                    max_samples=5000,
+                    device=device,
                 )
-            path_loader = train_alt_em_sgd._path_loader_cache
-            
-            # Extract group_ids if available (for SEI computation)
-            group_ids = None
-            n_groups = None
-            if hasattr(train_loader.dataset, 'get_group_ids'):
-                group_ids = train_loader.dataset.get_group_ids()
-                if group_ids is not None:
-                    # Get n_groups from dataset or config
-                    if hasattr(train_loader.dataset, 'n_groups'):
-                        n_groups = train_loader.dataset.n_groups
-                    else:
-                        # Try to infer from group_ids
-                        n_groups = int(group_ids.max() + 1) if len(group_ids) > 0 else None
-            
-            # CRITICAL: prev_masks_path_metrics must be computed from the same loader (path_loader)
-            # that compute_path_metrics uses, otherwise we get size mismatches (e.g., 4096 vs 5000)
-            # Compute prev_masks_path_metrics from path_loader if it's None or if we need to update it
-            if prev_masks_path_metrics is None:
-                # First time: compute from path_loader
-                prev_masks_path_metrics = dataset_masks(model, path_loader, device)
-            
-            path_metrics = compute_path_metrics(
-                model, path_loader, device=device, 
-                prev_masks=prev_masks_path_metrics,  # Use masks from path_loader, not train_loader
-                prev_path_hashes=prev_path_hashes,
-                return_masks=True,  # Return masks so we can update prev_masks_path_metrics
-                return_path_hashes=True,  # Need path hashes for next cycle
-                group_ids=group_ids, n_groups=n_groups
-            )
-            
-            # Update prev_masks_path_metrics from returned masks for next iteration
-            if path_metrics is not None and "cur_masks" in path_metrics:
-                prev_masks_path_metrics = path_metrics["cur_masks"]
-            # Update prev_path_hashes for next cycle
-            if path_metrics is not None and "cur_path_hashes" in path_metrics:
-                prev_path_hashes = path_metrics["cur_path_hashes"]
-        else:
-            B_total=B_layers=H_total=H_layers=deltas=None
-            gate_stats_dict = None
-            # Effective rank uses SVD - compute less frequently for speed
-            if (cyc % effective_rank_freq == 0) or (cyc == 1) or (cyc == cycles):
-                eff_ranks = compute_effective_ranks(model, train_loader, device)
-            else:
-                eff_ranks = None
-            path_metrics = None
+            except Exception as e:
+                print(f"  [path_kernel_metrics] Warning: Failed at cycle {cyc}: {e}")
+
+        # Path metrics removed - no longer computing standard path metrics
 
         # Early stopping check
         early_stopped = False
@@ -244,9 +172,18 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
             early_stopped = True
 
         # Run path analysis at intervals (start, end, and every N cycles)
+        checkpoint_metrics = {}
         if path_analysis_out_dir is not None and ((cyc % path_analysis_freq == 0) or (cyc == 1) or (cyc == cycles)):
             try:
-                from ..analysis.path_analysis import run_full_analysis_at_checkpoint
+                from ..analysis.path_analysis import (
+                    run_full_analysis_at_checkpoint,
+                    path_embedding,
+                    compute_path_shapley_metrics,
+                    compute_centroid_drift_metrics,
+                    compute_lineage_sankey_metrics,
+                )
+                from ..analysis.path_kernel import compute_path_kernel_eigs
+                
                 run_full_analysis_at_checkpoint(
                     model=model,
                     val_loader=val_loader,
@@ -259,55 +196,76 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
                     max_samples_kernel=5000,  # Limit samples for speed
                     max_samples_embed=5000,
                 )
+                
+                # Collect checkpoint embeddings for lineage/centroid metrics
+                try:
+                    Epack = path_embedding(
+                        model, val_loader, device=device, mode="routing_gain",
+                        normalize=True, max_samples=5000
+                    )
+                    E_tensor = Epack["E"]
+                    # Safely get y_data - avoid boolean evaluation of tensors
+                    y_data = Epack.get("labels")
+                    if y_data is None:
+                        y_data = Epack.get("y")
+                    
+                    checkpoint_embeddings.append((cyc, E_tensor.detach().cpu()))
+                    
+                    # Compute Path-Shapley if we have kernel eigenvectors
+                    if y_data is not None and (not isinstance(y_data, torch.Tensor) or y_data.numel() > 0):
+                        try:
+                            kern = compute_path_kernel_eigs(
+                                model, val_loader, device=device, mode="routing_gain",
+                                include_input=True, k=24, n_iter=30, block_size=1024,
+                                max_samples=5000, verbose=False
+                            )
+                            if "evecs" in kern:
+                                evecs = kern["evecs"].detach().cpu().numpy()
+                                y_np = y_data.numpy() if isinstance(y_data, torch.Tensor) else y_data
+                                top_m = min(24, evecs.shape[1])
+                                scores = evecs[:, :top_m]
+                                shapley_metrics = compute_path_shapley_metrics(scores, y_np)
+                                checkpoint_metrics.update(shapley_metrics)
+                        except Exception as e:
+                            print(f"  [checkpoint_metrics] Path-Shapley failed: {e}")
+                except Exception as e:
+                    print(f"  [checkpoint_metrics] Embedding collection failed: {e}")
+                
                 print(f"  [path_analysis] Completed for cycle {cyc}")
             except Exception as e:
                 print(f"  [path_analysis] Warning: Failed at cycle {cyc}: {e}")
+        
+        # Compute centroid drift and lineage metrics from collected embeddings
+        if len(checkpoint_embeddings) >= 2:
+            try:
+                from ..analysis.path_analysis import (
+                    compute_centroid_drift_metrics,
+                    compute_lineage_sankey_metrics,
+                )
+                E_time = [E for _, E in checkpoint_embeddings]
+                drift_metrics = compute_centroid_drift_metrics(E_time, k=8)
+                lineage_metrics = compute_lineage_sankey_metrics(E_time, k=8)
+                checkpoint_metrics.update(drift_metrics)
+                checkpoint_metrics.update(lineage_metrics)
+            except Exception as e:
+                print(f"  [checkpoint_metrics] Drift/Lineage computation failed: {e}")
+        
+        if checkpoint_metrics:
+            checkpoint_metrics_history.append({
+                "cycle": cyc,
+                **checkpoint_metrics
+            })
 
         hist_entry = {
             "cycle": cyc,
             "train_loss": tr_loss, "train_acc": tr_acc,
             "val_loss": va_loss,   "val_acc": va_acc,
-            "slope_budget_total": B_total,  "slope_budget_layers": B_layers,
-            "slope_entropy_total": H_total, "slope_entropy_layers": H_layers,
-            "slope_deviation_layers": deltas,
             "mask_churn_layers": churn_layers,
             "pruning": pruning_stats,
-            "effective_rank_layers": eff_ranks,
-            "gate_stats": gate_stats_dict
         }
-        # Add path metrics if computed
-        if path_metrics is not None:
-            hist_entry.update({
-                "path_pressure_layers": path_metrics.get("path_pressure_layers"),
-                "path_entropy_layers": path_metrics.get("path_entropy_layers"),
-                "active_path_complexity": path_metrics.get("active_path_complexity"),
-                "snr_max_layers": path_metrics.get("snr_max_layers"),
-                "snr_p95_layers": path_metrics.get("snr_p95_layers"),
-                "churn_active_layers": path_metrics.get("churn_active_layers"),
-                "sei_layers": path_metrics.get("sei_layers"),
-                # New path-centric metrics
-                "H_path": path_metrics.get("H_path"),
-                "H_gain": path_metrics.get("H_gain"),
-                "I_layers": path_metrics.get("I_layers"),
-                "confident_churn_layers": path_metrics.get("confident_churn_layers"),
-                "path_snr_count_above_threshold": path_metrics.get("path_snr_count_above_threshold"),
-                "path_snr_threshold": path_metrics.get("path_snr_threshold"),
-                "path_snr_num_paths": path_metrics.get("path_snr_num_paths"),
-                # Path SNR components: c_gamma (label correlation) - mean, median, std
-                "path_snr_c_gamma_mean": path_metrics.get("path_snr_c_gamma_mean"),
-                "path_snr_c_gamma_median": path_metrics.get("path_snr_c_gamma_median"),
-                "path_snr_c_gamma_std": path_metrics.get("path_snr_c_gamma_std"),
-                # Path SNR components: N_gamma (sample support) - mean, median, std
-                "path_snr_N_gamma_mean": path_metrics.get("path_snr_N_gamma_mean"),
-                "path_snr_N_gamma_median": path_metrics.get("path_snr_N_gamma_median"),
-                "path_snr_N_gamma_std": path_metrics.get("path_snr_N_gamma_std"),
-                "path_snr_N_gamma_total": path_metrics.get("path_snr_N_gamma_total"),
-                # Path SNR components: SNR_gamma (signal-to-noise ratio) - mean, median, std
-                "path_snr_SNR_gamma_mean": path_metrics.get("path_snr_SNR_gamma_mean"),
-                "path_snr_SNR_gamma_median": path_metrics.get("path_snr_SNR_gamma_median"),
-                "path_snr_SNR_gamma_std": path_metrics.get("path_snr_SNR_gamma_std"),
-                "nri": path_metrics.get("nri"),
-            })
+        # Add path kernel metrics
+        if path_kernel_metrics:
+            hist_entry.update(path_kernel_metrics)
         history.append(hist_entry)
         if test_loss is not None:
             history[-1]["test_loss"] = test_loss
@@ -315,4 +273,6 @@ def train_alt_em_sgd(model, train_loader, val_loader, config, test_loader=None):
         
         if early_stopped:
             break
-    return history
+    
+    # Return checkpoint metrics history for saving
+    return history, checkpoint_metrics_history
