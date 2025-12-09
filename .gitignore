@@ -4,5 +4,5 @@
 *.pyc
 *.png
 *.tar
-/data
+data/
 .gz
