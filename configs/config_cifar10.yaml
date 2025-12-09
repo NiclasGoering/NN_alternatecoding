@@ -1,0 +1,60 @@
+# config_cifar10.yaml
+experiment_name: 04_12_cifar/cifar10_run_1_shuffle
+seed: 123
+device: cuda  # Use GPU (H100) - set to 'cpu' if no GPU available
+
+dataset:
+  name: cifar10
+  # Binary classification task type:
+  #   - "even_odd": Even classes (0,2,4,6,8) vs Odd classes (1,3,5,7,9)
+  #     Classes: 0=airplane, 1=automobile, 2=bird, 3=cat, 4=deer, 5=dog, 6=frog, 7=horse, 8=ship, 9=truck
+  #   - "low_high": Low classes (0,1,2,3,4) vs High classes (5,6,7,8,9)
+  #   - "specific": Specific class pair (requires class_pair config)
+  binary_task: specific #even_odd
+  # For binary_task="specific", specify which two classes to classify
+  class_pair: [0, 1]  # Uncomment and set for specific class pair task
+  # Randomly shuffle labels to break the relationship between classes and labels
+  # When true, labels are randomly reassigned, making the task impossible to learn
+  # Set to true for shuffled version, false for non-shuffled
+  random_labels: true
+  # sizes (can be a list to train on multiple sizes)
+  n_train: [500, 9000]  # CIFAR-10 has 50k training samples
+  n_val: 10000
+  n_test: 10000
+
+model:
+  widths: [1024, 1024, 1024, 1024,1024]
+  activation: relu  # Options: relu, gelu, tanh, sigmoid, elu
+  bias: false
+
+training:
+  algo: sgd  # Only 'sgd' is supported
+  epochs: 8000
+  batch_size: 4096
+  lr_w: 5e-4  # Learning rate for SGD
+  loss: mse
+
+logging:
+  eval_every_cycle: true
+  save_checkpoints: true
+  save_model: true  # Set to false to skip saving model files (saves disk space)
+  # Computation frequency controls (for speed optimization)
+  # Enable expensive path analysis stack (kernel eigs, plots, dominant paths)
+  enable_path_analysis: true
+  # Enable/disable Path Sankey diagram (nn_graph_paths) - can be very expensive
+  # When false, skips: mean transmittance computation, path feature computation, alignment, graph drawing
+  enable_nn_graph_paths: false
+  # Effective rank SVDs are expensive: run every 200 epochs
+  effective_rank_every_n_epochs: 250
+  # Path kernel metrics (SVD on large matrices): run every 200 epochs
+  path_kernel_metrics_every_n_epochs: 250
+  # Full path analysis (plots, dominant k paths): run every 200 epochs
+  path_analysis_every_n_epochs: 250
+  # Gate-state counting: run every 200 epochs
+  gate_states_every_n_epochs: 250
+  # Number of samples to use for gate state computation (default: 2500)
+  gate_states_max_samples: 2500
+  # Kernel computation settings (tuned for H100)
+  path_kernel_block_size: 4096
+  path_kernel_power_iters: 25
+

@@ -117,6 +117,7 @@ def build_hierarchical_xor_datasets(cfg):
       - L, m, s
       - n_train, n_val, n_test
       - distractor_dims (optional)
+      - random_labels (optional): If True, randomly assign labels to break input-target correlation
     """
     ds = cfg["dataset"]
     L  = int(ds.get("L", 3))
@@ -124,6 +125,7 @@ def build_hierarchical_xor_datasets(cfg):
     s  = int(ds.get("s", 6))
     ntr, nva, nte = int(ds["n_train"]), int(ds["n_val"]), int(ds["n_test"])
     distractor_dims = int(ds.get("distractor_dims", 0))
+    random_labels = ds.get("random_labels", False)
     seed = int(cfg.get("seed", 0))
 
     Xtr, ytr, groups_tr, meta = gen_xor_tree_split(
@@ -141,5 +143,28 @@ def build_hierarchical_xor_datasets(cfg):
         distractor_dims=distractor_dims,
         seed=seed + 2,
     )
+    
+    # Randomly assign labels if requested (breaks the relationship between inputs and labels)
+    if random_labels:
+        print(f"[hierarchical_xor] WARNING: Random labels enabled - randomly assigning labels to break input-target relationship")
+        rng = np.random.default_rng(seed)
+        # Randomly assign +1 or -1 to each sample independently
+        # This means the same input pattern can have different labels in different samples
+        ytr = rng.choice([1.0, -1.0], size=(len(ytr), 1)).astype(np.float32)
+        yva = rng.choice([1.0, -1.0], size=(len(yva), 1)).astype(np.float32)
+        yte = rng.choice([1.0, -1.0], size=(len(yte), 1)).astype(np.float32)
+        print(f"[hierarchical_xor] Labels randomly assigned: each sample gets a random label (+1 or -1) independent of its input")
+    
+    # Apply alpha scaling to labels
+    alpha = float(ds.get("alpha", 1.0))
+    if alpha != 1.0:
+        print(f"[hierarchical_xor] Applying alpha scaling: {alpha} (labels will be multiplied by {alpha})")
+        ytr = (ytr * alpha).astype(np.float32)
+        yva = (yva * alpha).astype(np.float32)
+        yte = (yte * alpha).astype(np.float32)
+    
+    # Add alpha to meta
+    meta["alpha"] = alpha
+    
     return Xtr, ytr, Xva, yva, Xte, yte, meta, groups_tr, groups_va, groups_te
 

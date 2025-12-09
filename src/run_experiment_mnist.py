@@ -1,4 +1,4 @@
-# src/run_experiment.py
+# src/run_experiment_mnist.py
 from __future__ import annotations
 import argparse, time, os, json, copy
 import torch
@@ -11,64 +11,33 @@ from .utils.seed     import set_seed
 from .utils.save_io  import ensure_dir, save_json, save_csv, save_model
 from .data.models.ffnn import MLP
 
-# Parity dataset (default)
-from .data.ksparse_parity import gen_ksparse_parity, ParityDataset
+# MNIST dataset
+from .data.mnist import build_mnist_datasets, MNISTDataset
 
-# Optional: synonym-tree dataset
-_HAS_SYN_TREE = True
-try:
-    from .data.hierarchical_synonyms import build_synonym_tree_datasets, SynonymTreeDataset
-except Exception:
-    _HAS_SYN_TREE = False
-
-# Hierarchical XOR dataset
-from .data.hierarchical_xor import build_hierarchical_xor_datasets, HierarchicalXORDataset
+# CIFAR-10 dataset
+from .data.cifar10 import build_cifar10_datasets, CIFAR10Dataset
 
 
 def build_dataloaders(cfg, n_train_override=None, alpha_override=None):
     """
-    Build dataloaders. 
+    Build dataloaders for MNIST or CIFAR-10. 
     If n_train_override is provided, use that instead of cfg["dataset"]["n_train"].
     If alpha_override is provided, use that instead of cfg["dataset"]["alpha"].
     """
     ds_cfg = cfg["dataset"]
-    name = ds_cfg.get("name", "ksparse_parity").lower()
+    name = ds_cfg.get("name", "mnist").lower()
 
-    if name == "synonym_tree":
-        if not _HAS_SYN_TREE:
-            raise ValueError("Requested dataset=name 'synonym_tree' but 'data/hierarchical_synonyms.py' is not available.")
+    if name == "mnist":
         temp_cfg = copy.deepcopy(cfg)
         if n_train_override is not None:
             temp_cfg["dataset"]["n_train"] = n_train_override
         if alpha_override is not None:
             temp_cfg["dataset"]["alpha"] = alpha_override
 
-        Xtr, ytr, Xva, yva, Xte, yte, meta = build_synonym_tree_datasets(temp_cfg)
-        ds_tr = SynonymTreeDataset(Xtr, ytr)
-        ds_va = SynonymTreeDataset(Xva, yva)
-        ds_te = SynonymTreeDataset(Xte, yte)
-        bs    = cfg["training"]["batch_size"]
-        train_loader      = DataLoader(ds_tr, batch_size=min(bs, len(ds_tr)), shuffle=True,  drop_last=False)
-        full_train_loader = DataLoader(ds_tr, batch_size=len(ds_tr),           shuffle=False)
-        val_loader        = DataLoader(ds_va, batch_size=len(ds_va),           shuffle=False)
-        test_loader       = DataLoader(ds_te, batch_size=len(ds_te),           shuffle=False)
-        # 'meta' should include 'd' for input dim; if not, infer:
-        if "d" not in meta:
-            meta["d"] = int(Xtr.shape[1])
-        return train_loader, full_train_loader, val_loader, test_loader, meta
-
-    if name == "hierarchical_xor":
-        temp_cfg = copy.deepcopy(cfg)
-        if n_train_override is not None:
-            temp_cfg["dataset"]["n_train"] = n_train_override
-        if alpha_override is not None:
-            temp_cfg["dataset"]["alpha"] = alpha_override
-
-        Xtr, ytr, Xva, yva, Xte, yte, meta, groups_tr, groups_va, groups_te = build_hierarchical_xor_datasets(temp_cfg)
-        n_groups = meta.get("n_groups")
-        ds_tr = HierarchicalXORDataset(Xtr, ytr, groups=groups_tr, n_groups=n_groups)
-        ds_va = HierarchicalXORDataset(Xva, yva, groups=groups_va, n_groups=n_groups)
-        ds_te = HierarchicalXORDataset(Xte, yte, groups=groups_te, n_groups=n_groups)
+        Xtr, ytr, Xva, yva, Xte, yte, meta = build_mnist_datasets(temp_cfg)
+        ds_tr = MNISTDataset(Xtr, ytr)
+        ds_va = MNISTDataset(Xva, yva)
+        ds_te = MNISTDataset(Xte, yte)
         bs    = cfg["training"]["batch_size"]
         train_loader      = DataLoader(ds_tr, batch_size=min(bs, len(ds_tr)), shuffle=True,  drop_last=False)
         full_train_loader = DataLoader(ds_tr, batch_size=len(ds_tr),           shuffle=False)
@@ -77,27 +46,27 @@ def build_dataloaders(cfg, n_train_override=None, alpha_override=None):
         if "d" not in meta:
             meta["d"] = int(Xtr.shape[1])
         return train_loader, full_train_loader, val_loader, test_loader, meta
+    elif name == "cifar10":
+        temp_cfg = copy.deepcopy(cfg)
+        if n_train_override is not None:
+            temp_cfg["dataset"]["n_train"] = n_train_override
+        if alpha_override is not None:
+            temp_cfg["dataset"]["alpha"] = alpha_override
 
-    # Default: ksparse_parity (backward compatible)
-    d, k = ds_cfg["d"], ds_cfg["k"]
-    ntr  = n_train_override if n_train_override is not None else ds_cfg["n_train"]
-    nva, nte = ds_cfg["n_val"], ds_cfg["n_test"]
-    x_dist   = ds_cfg.get("x_dist", "pm1")
-    noise    = ds_cfg.get("label_noise", 0.0)
-    seed     = cfg["seed"]
-
-    Xtr, ytr, S = gen_ksparse_parity(d, k, ntr, x_dist=x_dist, label_noise=noise, seed=seed)
-    Xva, yva, _ = gen_ksparse_parity(d, k, nva, x_dist=x_dist, label_noise=noise, seed=seed+1)
-    Xte, yte, _ = gen_ksparse_parity(d, k, nte, x_dist=x_dist, label_noise=noise, seed=seed+2)
-
-    ds_tr, ds_va, ds_te = ParityDataset(Xtr, ytr), ParityDataset(Xva, yva), ParityDataset(Xte, yte)
-    bs = cfg["training"]["batch_size"]
-    train_loader      = DataLoader(ds_tr, batch_size=min(bs, len(ds_tr)), shuffle=True,  drop_last=False)
-    full_train_loader = DataLoader(ds_tr, batch_size=len(ds_tr),           shuffle=False)
-    val_loader        = DataLoader(ds_va, batch_size=len(ds_va),           shuffle=False)
-    test_loader       = DataLoader(ds_te, batch_size=len(ds_te),           shuffle=False)
-    meta = {"name": "ksparse_parity", "d": int(d), "k": int(k), "S": list(map(int, S))}
-    return train_loader, full_train_loader, val_loader, test_loader, meta
+        Xtr, ytr, Xva, yva, Xte, yte, meta = build_cifar10_datasets(temp_cfg)
+        ds_tr = CIFAR10Dataset(Xtr, ytr)
+        ds_va = CIFAR10Dataset(Xva, yva)
+        ds_te = CIFAR10Dataset(Xte, yte)
+        bs    = cfg["training"]["batch_size"]
+        train_loader      = DataLoader(ds_tr, batch_size=min(bs, len(ds_tr)), shuffle=True,  drop_last=False)
+        full_train_loader = DataLoader(ds_tr, batch_size=len(ds_tr),           shuffle=False)
+        val_loader        = DataLoader(ds_va, batch_size=len(ds_va),           shuffle=False)
+        test_loader       = DataLoader(ds_te, batch_size=len(ds_te),           shuffle=False)
+        if "d" not in meta:
+            meta["d"] = int(Xtr.shape[1])
+        return train_loader, full_train_loader, val_loader, test_loader, meta
+    else:
+        raise ValueError(f"Unknown dataset name: {name}. Only 'mnist' and 'cifar10' are supported in this script.")
 
 
 def run_algorithm(
@@ -115,6 +84,7 @@ def run_algorithm(
 ):
     """
     Run one algorithm, save model, history, and final metrics.
+    Reuses the same sgd.py training function.
     """
     from .algos.sgd import train_sgd
 
@@ -138,14 +108,18 @@ def run_algorithm(
     enable_path_analysis = cfg.get("logging", {}).get("enable_path_analysis", False)
     if enable_path_analysis:
         train_cfg["path_analysis_out_dir"] = path_analysis_dir
+    # Always set algo_dir in config so plotting code can use it
+    train_cfg["algo_dir"] = algo_dir
 
     # Fresh model - move to device immediately to ensure correct GPU assignment
     activation = train_cfg["model"].get("activation", "relu")
+    n_classes = meta.get("n_classes", 1)  # Get n_classes from meta (10 for multiclass, 1 for binary)
     model = MLP(
         input_dim,
         train_cfg["model"]["widths"],
         bias=train_cfg["model"]["bias"],
-        activation=activation
+        activation=activation,
+        n_classes=n_classes
     )
     # Move model to device immediately to ensure it's on the correct GPU
     model = model.to(device)
@@ -170,9 +144,10 @@ def run_algorithm(
         raise ValueError(f"Unknown algo={algo_name}. Only 'sgd' is supported.")
 
     # Final evaluation
-    trA, trL = _eval(model, full_train_loader, device)
-    vaA, vaL = _eval(model, val_loader, device)
-    teA, teL = _eval(model, test_loader, device)
+    n_classes = meta.get("n_classes", 1)
+    trA, trL = _eval(model, full_train_loader, device, n_classes)
+    vaA, vaL = _eval(model, val_loader, device, n_classes)
+    teA, teL = _eval(model, test_loader, device, n_classes)
 
     # Save artifacts
     # Save final model only if save_model is enabled
@@ -343,7 +318,7 @@ def _worker_thread(job_queue, result_queue, gpu_id):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", type=str, default="config.yaml")
+    ap.add_argument("--config", type=str, default="configs/config_mnist.yaml")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -472,18 +447,44 @@ def main():
 
 
 @torch.no_grad()
-def _eval(model, loader, device):
+def _eval(model, loader, device, n_classes=None):
+    """Evaluate model for binary or multi-class classification."""
     model.eval()
     L = A = n = 0.0
+    
+    # Detect n_classes from model if not provided
+    if n_classes is None:
+        if hasattr(model, 'n_classes'):
+            n_classes = model.n_classes
+        elif hasattr(model, 'readout'):
+            out_features = model.readout.out_features
+            n_classes = out_features if out_features > 1 else None
+    
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
         yhat = model(xb)
-        L += torch.mean((yhat - yb) ** 2).item() * xb.size(0)
-        A += torch.sign(yhat).eq(yb).float().mean().item() * xb.size(0)
+        
+        if n_classes is None or n_classes == 1:
+            # Binary classification: MSE loss and sign-based accuracy
+            L += torch.mean((yhat - yb) ** 2).item() * xb.size(0)
+            A += torch.sign(yhat).eq(yb).float().mean().item() * xb.size(0)
+        else:
+            # Multi-class classification: Cross-entropy loss and argmax accuracy
+            import torch.nn.functional as F
+            # Ensure yb is long for cross-entropy
+            if yb.dim() > 1:
+                yb = yb.view(-1)
+            yb_long = yb.long()
+            L += F.cross_entropy(yhat, yb_long).item() * xb.size(0)
+            pred = yhat.argmax(dim=1)
+            A += (pred == yb_long).float().mean().item() * xb.size(0)
+        
         n += xb.size(0)
+    
     model.train(False)
     return A / n, L / n
 
 
 if __name__ == "__main__":
     main()
+

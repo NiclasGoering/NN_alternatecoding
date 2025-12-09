@@ -2928,7 +2928,7 @@ def main():
     # Configuration - set values here
     # ============================================================
     # Path to experiment output directory (must contain config.json)
-    output_dir = "/home/goring/NN_alternatecoding/outputs/27_11/hierarchical_xor_run_2_20251127_035024"
+    output_dir = "/home/goring/NN_alternatecoding/outputs/29_11/hierarchical_xor_run_2_20251129_172923"
     
     # Directory to save plots (None = use default: output_dir/plots/path_analysis_all)
     plots_dir = None

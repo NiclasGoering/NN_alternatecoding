@@ -1,0 +1,24 @@
+Source idx 0 label=+1
+Target idx 2 label=-1
+Preds -> clean: +1 | adv: +1 | target: -1
+Linf used ε=0.200, actual ||δ||_∞=0.200
+
+Gate flips clean→adv (count / frac):
+  L0: 8/1024 (0.8%)
+  L1: 49/1024 (4.8%)
+  L2: 3/1024 (0.3%)
+  L3: 24/1024 (2.3%)
+
+Gate flips clean→target (count / frac):
+  L0: 24/1024 (2.3%)
+  L1: 55/1024 (5.4%)
+  L2: 22/1024 (2.1%)
+  L3: 77/1024 (7.5%)
+
+Path-kernel entries on [clean, adv, target]:
+  clean_clean: 5.9401e+09
+  adv_adv: 3.0065e+09
+  target_target: 1.0411e+09
+  clean_adv: 1.7534e+09
+  clean_target: 6.0459e+07
+  adv_target: 0.0000e+00

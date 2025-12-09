@@ -1,0 +1,72 @@
+# config_mnist.yaml
+experiment_name: 09_12/mnist_run_1
+seed: 123
+device: cuda  # Use GPU (H100) - set to 'cpu' if no GPU available
+
+dataset:
+  name: mnist
+  # Task type:
+  #   - "multiclass": Standard 10-class classification (digits 0-9)
+  #   - "binary": Binary classification (requires binary_task config)
+  #     Options for binary_task:
+  #       - "even_odd": Even digits (0,2,4,6,8) vs Odd digits (1,3,5,7,9)
+  #       - "low_high": Low digits (0,1,2,3,4) vs High digits (5,6,7,8,9)
+  #       - "specific": Specific digit pair (requires digit_pair config)
+  task_type: multiclass  # Options: "multiclass" or "binary"
+  # For binary classification:
+  # binary_task: even_odd
+  # digit_pair: [0, 1]  # For binary_task="specific"
+  # Randomly shuffle labels to break the relationship between digits and labels
+  # When true, labels are randomly reassigned, making the task impossible to learn
+  random_labels: false
+  # sizes (can be a list to train on multiple sizes)
+  n_train: [50000]  # MNIST has 60k training samples  #1000 tanh, adam, 5x initialization, small bias,8000
+  n_val: 10000
+  n_test: 10000
+  # Alpha parameter: multiplies output labels (can be a list to sweep over values)
+  # e.g., alpha=5 means labels 0,1 become 0,5 (or -1,+1 become -5,+5)
+  alpha: [1.0, 10.0]  # Can be a single value or list for sweeping
+
+model:
+  widths: [1024, 1024, 1024, 1024]
+  activation: relu  # Options: relu, gelu, tanh, sigmoid, elu
+  bias: true
+
+training:
+  algo: sgd  # Only 'sgd' is supported
+  epochs: 2000
+  batch_size: 512
+  lr_w: 5e-4  # Learning rate
+  loss: mse
+  # Optimizer: "sgd" or "adam" (can be a list to sweep over both)
+  optimizer: ["sgd", "adam"]  # Options: "sgd" or "adam"
+
+logging:
+  eval_every_cycle: true
+  save_checkpoints: true
+  save_model: true  # Set to false to skip saving model files (saves disk space)
+  # Computation frequency controls (for speed optimization)
+  # Enable expensive path analysis stack (kernel eigs, plots, dominant paths)
+  enable_path_analysis: true
+  # Enable/disable Path Sankey diagram (nn_graph_paths) - can be very expensive
+  # When false, skips: mean transmittance computation, path feature computation, alignment, graph drawing
+  enable_nn_graph_paths: false
+  # Effective rank SVDs are expensive: run every 200 epochs
+  effective_rank_every_n_epochs: 250
+  # Path kernel metrics (SVD on large matrices): run every 200 epochs
+  path_kernel_metrics_every_n_epochs: 250
+  # Full path analysis (plots, dominant k paths): run every 200 epochs
+  path_analysis_every_n_epochs: 250
+  # Gate-state counting: run every 200 epochs
+  gate_states_every_n_epochs: 250
+  # Number of samples to use for gate state computation (default: 2500)
+  gate_states_max_samples: 2500
+  # Kernel computation settings (tuned for H100)
+  path_kernel_block_size: 4096
+  path_kernel_power_iters: 25
+  # Path kernel computation mode:
+  #   - "routing": Binary indicator E_ℓ = 1(u_ℓ > 0) (only routing information)
+  #   - "routing_gain": Includes gain factors E_ℓ = 1(u>0)*a_plus + 1(u<=0)*a_minus (default, recommended)
+  #   - "routing_posdev": Positive deviation only E_ℓ = 1(u>0)*max(a_plus-1,0)
+  path_kernel_mode: routing
+

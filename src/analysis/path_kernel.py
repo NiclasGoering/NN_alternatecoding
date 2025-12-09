@@ -455,7 +455,15 @@ def compute_path_kernel_eigs(
     )
     # Keep on GPU for now - caller can move to CPU if needed
     # This avoids unnecessary CPU transfers during computation
-    return {"evals": evals, "evecs": evecs, "meta": pack["meta"], "y": pack.get("y")}
+    # Also return E_list so callers can reuse it without re-iterating loader
+    return {
+        "evals": evals, 
+        "evecs": evecs, 
+        "meta": pack["meta"], 
+        "y": pack.get("y"),
+        "E_list": pack["E_list"],  # Add E_list for reuse
+        "X": pack.get("X"),  # Add X for reuse
+    }
 
 @torch.no_grad()
 def compute_classwise_path_kernel_eigs(
