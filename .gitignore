@@ -3,3 +3,6 @@
 *.csv
 *.pyc
 *.png
+*.tar
+/data
+.gz
