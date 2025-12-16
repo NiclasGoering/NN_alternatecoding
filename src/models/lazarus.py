@@ -1,5 +1,11 @@
 """
 LazarusMLP: Deep Residual MLP with Depth-Aware Scaling Initialization
+
+This architecture uses:
+- Residual blocks: x_{l+1} = x_l + Branch(x_l)
+- Branch structure: Linear → ReLU → Linear
+- Lazarus initialization: depth-aware scaling (α = 1/sqrt(2*depth))
+- No BatchNorm, LayerNorm, or Dropout - purely Linear and ReLU
 """
 from __future__ import annotations
 import torch
@@ -16,8 +22,22 @@ class LazarusMLP(nn.Module):
     Branch: Linear(width, width) → ReLU → Linear(width, width)
     
     No BatchNorm, LayerNorm, or Dropout - purely Linear and ReLU.
+    
+    Args:
+        d_in: Input dimension
+        widths: List of hidden layer widths (determines depth)
+        bias: Whether to use bias in linear layers
+        activation: Activation function name (default: relu)
+        n_classes: Number of output classes
     """
-    def __init__(self, d_in: int, widths: list[int], bias: bool = True, activation: str = "relu", n_classes: int = 1):
+    def __init__(
+        self, 
+        d_in: int, 
+        widths: list[int], 
+        bias: bool = True, 
+        activation: str = "relu", 
+        n_classes: int = 1
+    ):
         super().__init__()
         self.activation_name = activation.lower()
         self.depth = len(widths)
@@ -92,6 +112,17 @@ class LazarusMLP(nn.Module):
             nn.init.zeros_(self.readout.bias)
     
     def forward(self, x, return_cache: bool = False):
+        """
+        Forward pass through the network.
+        
+        Args:
+            x: Input tensor of shape (batch_size, d_in)
+            return_cache: If True, return intermediate activations
+            
+        Returns:
+            yhat: Output tensor of shape (batch_size, n_classes)
+            cache: Dict with intermediate activations (if return_cache=True)
+        """
         cache = {"u": [], "z": [], "h": []}
         
         # Input projection
@@ -120,6 +151,7 @@ class LazarusMLP(nn.Module):
         return yhat
     
     def set_weights_requires_grad(self, flag: bool):
+        """Enable or disable gradient computation for all parameters."""
         for p in self.parameters():
             p.requires_grad_(flag)
 

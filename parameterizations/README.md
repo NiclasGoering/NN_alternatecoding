@@ -1,88 +1,148 @@
-# Parameterizations Experiment
+# Parameterization Experiments
 
-This folder contains code for training FFNNs on MNIST with different parameterizations (standard, mup, ntk) and tracking metrics over training.
+This directory contains the configuration and entry point for running neural network training experiments with different parameterization schemes.
 
-## Files
+## Directory Structure
 
-- `config_mnist_parameterizations.yaml`: Configuration file for the experiment
-- `train_parameterizations.py`: Main training script
+After restructuring, the code is organized modularly:
 
-## Metrics Tracked
+```
+NN_alternatecoding/
+├── parameterizations/
+│   ├── run_experiment_parameterization.py  # Clean entry point
+│   ├── config_mnist_parameterizations.yaml # Configuration file
+│   └── README.md                           # This file
+│
+└── src/
+    ├── models/                  # Model architectures
+    │   ├── __init__.py          # Exports all models
+    │   ├── lazarus.py           # LazarusMLP (depth-aware residual MLP)
+    │   ├── resnet.py            # MLPResNet (skip connections + batchnorm)
+    │   └── batchnorm.py         # MLPBatchNorm (batchnorm only)
+    │
+    ├── training/                # Training loop and initialization
+    │   ├── __init__.py          # Exports training functions
+    │   ├── trainer.py           # train_with_parameterization()
+    │   └── initialization.py    # initialize_parameterization()
+    │
+    ├── analysis/
+    │   ├── mobility.py          # Gate mobility computations (M_g, d_f, LR)
+    │   ├── path_kernel.py       # Path kernel analysis
+    │   └── ...
+    │
+    └── utils/
+        ├── plotting.py          # All plotting functions
+        └── ...
+```
 
-Every `metrics_every_n_epochs` epochs (default: 100), the following metrics are computed:
+## Supported Parameterizations
 
-1. **Train Loss**: MSE loss on training set
-2. **Test Loss**: MSE loss on test set
-3. **M_g (Gate Mobility Number)**: Measures the energy cost required to flip a gate
-   - Formula: `M_g = (η * E[||∇w||]) / E[d_f]`
-4. **C_def (Path Deformation Capacity)**: Measures how much the path kernel H differs from input kernel Σ
-   - Formula: `C_def = ||H_norm - Σ_norm||_F`
-5. **H_Λ (Path Covariance Entropy)**: Entropy of the path overlap matrix Λ
-   - Formula: `H_Λ = -∑_{i,j} P(Λ_ij) log P(Λ_ij)`
+- **standard**: Xavier/Kaiming initialization
+- **mup**: Maximal Update Parametrization (1/sqrt(width) scaling)
+- **ntk**: Neural Tangent Kernel parametrization
+- **mup_L**: mup with Lazarus depth scaling
+- **path**: Path parameterization with LazarusMLP and adaptive layer-wise LR
 
-## Parameterizations
+### Optimizer Suffixes
 
-1. **standard**: Standard Xavier/Kaiming initialization
-2. **mup (Maximal Update Parametrization)**: 
-   - Hidden layers: scale by 1/sqrt(width)
-   - Output layer: scale by 1/sqrt(width)
-3. **ntk (Neural Tangent Kernel)**: 
-   - All layers: scale by 1/sqrt(width)
-4. **mup_L (Maximal Update Parametrization + Lazarus depth scaling)**: 
-   - Combines mup initialization with Lazarus depth-aware scaling
-   - For standard architectures: same as mup
-   - For LazarusMLP: mup init + depth scaling (α = 1/sqrt(2*depth)) on branch outputs
-5. **path**: Path-based adaptive learning rate
-   - Uses Lazarus initialization (depth-aware scaling)
-   - After each epoch, computes optimal LR: η ≈ median(d_f) / E[||∇w||]
-   - Automatically updates learning rate for next epoch
+You can combine parameterizations with different optimizers:
+- `standard_adam`, `standard_sgd`, `standard_muon`
+- `mup_adam`, `mup_sgd`
+- etc.
+
+### BatchNorm Modifier
+
+Add `_batchnorm` to use BatchNorm:
+- `standard_batchnorm`, `standard_batchnorm_adam`
 
 ## Usage
 
-```bash
-# Run with default config
-python parameterizations/train_parameterizations.py
+### Basic Usage
 
-# Run with custom config
-python parameterizations/train_parameterizations.py --config parameterizations/config_mnist_parameterizations.yaml
+```bash
+# From project root
+python parameterizations/run_experiment_parameterization.py --config parameterizations/config_mnist_parameterizations.yaml
 ```
 
-## Configuration
+### Custom Config
+
+```bash
+python parameterizations/run_experiment_parameterization.py --config my_config.yaml
+```
+
+## Configuration File
 
 Edit `config_mnist_parameterizations.yaml` to customize:
 
-- `model.architecture`: Architecture type ("standard", "resnet", or "lazarus")
-- `model.depth`: Number of hidden layers
-- `model.width`: Fixed width for all hidden layers
-- `training.parameterization`: List of parameterizations to run (e.g., `[standard, mup, ntk, path]`)
-- `training.epochs`: Number of training epochs
-- `training.lr_w`: Learning rate
-- `training.optimizer`: Optimizer type ("sgd" or "adam")
-- `logging.metrics_every_n_epochs`: Frequency of metric computation (default: 100)
-- `logging.m_g_n_batches`: Number of batches for M_g computation (default: 16)
-- `logging.kernel_max_samples`: Max samples for kernel computation (default: 8192)
+```yaml
+experiment_name: mnist_parameterizations
+seed: 123
+device: cuda
 
-## Architectures
+dataset:
+  name: mnist
+  task_type: multiclass
+  n_train: 50000
+  n_test: 10000
+  alpha: 1.0
 
-1. **standard**: Standard MLP with no skip connections or batch normalization
-2. **resnet**: MLP with skip connections and batch normalization (ResNet-style)
-3. **lazarus**: Deep residual MLP with depth-aware scaling initialization
-   - Structure: Stack of L residual blocks
-   - Block: x_{l+1} = x_l + Branch(x_l)
-   - Branch: Linear(width, width) → ReLU → Linear(width, width)
-   - Initialization: Kaiming Normal with α = 1/sqrt(2*depth) scaling on branch output
-   - No BatchNorm, LayerNorm, or Dropout
+model:
+  architecture: resnet  # Options: standard, resnet, lazarus
+  depth: 45
+  width: 350
+  activation: relu
+  bias: true
 
-## Output
+training:
+  epochs: 1000
+  batch_size: 1024
+  lr_w: 1e-4
+  lr_w_path: 1e-4  # Base LR for path parameterization
+  automatic: false  # Enable automatic LR from target mobility
+  target_mobility: 0.3
+  warmup_epochs: 0
+  grad_clip_max_norm: 10.0
+  optimizer: sgd
+  # Can be single value or list to sweep
+  parameterization: [standard, mup, path]
 
-Results are saved to `outputs/{experiment_name}_{timestamp}/`:
+logging:
+  metrics_every_n_epochs: 250
+  compute_metrics: false
+  m_g_n_batches: 8
+```
 
-- `history_{architecture}_{parameterization}.json`: Training history for each architecture/parameterization combination
-- `metrics_{architecture}_{parameterization}.png`: Individual plots for each combination
-- `metrics_comparison.png`: Comparison plot across all combinations
-- `config.json`: Saved configuration
+## Importing Modules
 
-## Dependencies
+The modular structure allows clean imports:
 
-The script uses functions from `outputs/gates/gate_velocity_with_capacity.py` for computing M_g, C_def, and H_Λ metrics.
+```python
+# Models
+from src.models import MLP, MLPResNet, MLPBatchNorm, LazarusMLP
 
+# Training
+from src.training import train_with_parameterization, initialize_parameterization
+
+# Analysis
+from src.analysis.mobility import compute_gate_mobility_lazarus
+
+# Plotting
+from src.utils.plotting import plot_metrics, plot_comparison
+```
+
+## Metrics Tracked
+
+- **Train/Test Loss**: MSE loss per epoch
+- **M_g**: Gate Mobility Number (per layer)
+- **C_def**: Path Deformation Capacity
+- **H_Lambda**: Path Covariance Entropy
+- **LR per layer**: Learning rate evolution (for path parameterization)
+- **Gradient norms**: Per-layer gradient norms (pre-clipping)
+
+## Multi-GPU Support
+
+When multiple GPUs are available and multiple parameterizations are requested, training runs in parallel across GPUs automatically.
+
+## Legacy Files
+
+The original `train_parameterizations.py` and `mlp_lazarus.py` are retained for reference but can be removed once the new structure is verified.

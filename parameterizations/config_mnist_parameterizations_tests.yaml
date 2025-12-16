@@ -1,6 +1,6 @@
 # config_mnist_parameterizations.yaml
 # Config for MNIST experiment comparing different parameterizations
-experiment_name: parameterizations_16_12/mnist_parameterizations_2
+experiment_name: parameterizations_16_12_tests/mnist_parameterizations_2
 seed: 123
 device: cuda  # Use GPU (H100) - set to 'cpu' if no GPU available
 
@@ -25,37 +25,37 @@ training:
   epochs: 1000
   batch_size: 1024
   lr_w: 1e-4  # Learning rate for non-path parameterizations
-  lr_w_path: 1e-4  # Base learning rate η₀ for path parameterization (optional, defaults to lr_w)
+  lr_w_path: 1e-2  # Base learning rate η₀ for path parameterization (optional, defaults to lr_w)
   automatic: false  # Enable automatic LR computation for path parameterization based on target mobility
-  target_mobility: 0.3  # Target gate mobility M* for automatic LR computation (default: 0.3)
+  target_mobility: 0.9  # Target gate mobility M* for automatic LR computation (default: 0.3)
   warmup_epochs: 0  # Linear warmup epochs for path parameterization (scales LR from 0.01x to 1.0x over warmup_epochs). Set to 0 to disable warmup.
   # Damped LR update hyperparameters for path parameterization (gate mobility based)
-  lr_update_alpha: 0.05  # Smoothing exponent α ∈ (0,1] for damped LR update (default: 0.25)
+  lr_update_alpha: 0.01  # Smoothing exponent α ∈ (0,1] for damped LR update (default: 0.25)
   lr_update_eps: 1e-8  # Small epsilon to avoid division by zero (default: 1e-8)
   lr_update_min_scale: 0.25  # Minimum multiplicative change per step (default: 0.5)
   lr_update_max_scale: 1.1  # Maximum multiplicative change per step (default: 1.5, reduced from 2.0 for stability)
-  lr_max: 1.0  # Maximum learning rate cap (default: 1.0) - prevents explosion
+  lr_max: 5.0  # Maximum learning rate cap (default: 1.0) - prevents explosion
   grad_clip_max_norm: 10.0  # Max-norm gradient clipping (0 disables)
   loss: mse
   optimizer: sgd  # Options: "sgd", "adam", or "muon". Can also be specified in parameterization name (e.g., "standard_adam", "standard_muon")
   # Parameterization type: "standard", "mup", "ntk", "mup_L", or "path"
   # Can also combine with optimizer: "standard_adam", "standard_muon", "mup_sgd", etc.
   # Can also add batchnorm: "standard_batchnorm" (SGD), "standard_batchnorm_adam" (Adam)
-  parameterization: [standard_batchnorm_adam, mup_L, path,standard_muon, standard_adam, standard_batchnorm,standard]  # Can be a list to sweep over all
+  parameterization: [ path]  # Can be a list to sweep over all
 
 logging:
   eval_every_cycle: true
   save_checkpoints: true
   save_model: false  # Set to false to save disk space
   # Track metrics every n epochs
-  metrics_every_n_epochs: 250
+  metrics_every_n_epochs: 100
   # If false, skip computing M_g, C_def, and H_Lambda (only compute train/test loss)
-  compute_metrics: false  # IMPORTANT: Set to false to avoid timeout (C_def/H_Lambda are very slow)
+  compute_metrics: false
   # Number of batches to use for M_g computation
-  m_g_n_batches: 8
+  m_g_n_batches: 4
   # Maximum samples for kernel computation (C_def, H_Lambda, kernel tracking)
   kernel_max_samples: 8192
   # Number of top eigenvalues to track for kernel spectrum
   topk_spectrum: 50
   # Track kernel metrics (path kernel rank, CKA, Wasserstein, hidden kernel, gradient EVs)
-  track_kernel_metrics: true
+  track_kernel_metrics: false
