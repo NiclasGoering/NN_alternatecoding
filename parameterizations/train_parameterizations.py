@@ -1623,21 +1623,24 @@ def train_with_parameterization(
                         traceback.print_exc()
                         # Continue training with current LRs - don't let LR update failure stop training
         
-        # Log train/test error every 10 epochs
+        # Compute train and test loss every epoch (for history tracking)
+        train_loss = evaluate_loss(model, train_loader, device, n_classes, alpha)
+        test_loss = evaluate_loss(model, test_loader, device, n_classes, alpha)
+        
+        # Log train/test error every 10 epochs (if not computing full metrics)
         if epoch % 10 == 0 and epoch % metrics_freq != 0:
-            # Only log if we're not computing full metrics this epoch
-            train_loss = evaluate_loss(model, train_loader, device, n_classes, alpha)
-            test_loss = evaluate_loss(model, test_loader, device, n_classes, alpha)
             print(f"{device_tag} [Epoch {epoch}] Train Loss: {train_loss:.6f}, Test Loss: {test_loss:.6f}")
+        
+        # Save train/test loss to history every epoch
+        history["epochs"].append(epoch)
+        history["train_loss"].append(train_loss)
+        history["test_loss"].append(test_loss)
         
         # Compute metrics at specified frequency
         if epoch % metrics_freq == 0:
             print(f"\n{device_tag} [Epoch {epoch}] Computing metrics...")
             
-            # Train and test loss
-            train_loss = evaluate_loss(model, train_loader, device, n_classes, alpha)
-            test_loss = evaluate_loss(model, test_loader, device, n_classes, alpha)
-            
+            # Train and test loss are already computed above, just print them
             print(f"{device_tag}   Train loss: {train_loss:.6f}, Test loss: {test_loss:.6f}")
             
             # Compute M_g
@@ -1880,15 +1883,18 @@ def train_with_parameterization(
                         history["grad_norms_per_layer"][layer_idx] = []
                     history["grad_norms_per_layer"][layer_idx].append(grad_norm)
             
-            # Store in history
-            history["epochs"].append(epoch)
-            history["train_loss"].append(train_loss)
-            history["test_loss"].append(test_loss)
+            # Store metrics in history (train_loss and test_loss already saved above)
             history["M_g_avg"].append(M_g_avg)
             history["C_def"].append(C_def)
             history["H_Lambda"].append(H_Lambda)
-            
-            # Save intermediate results
+        else:
+            # For epochs where metrics are not computed, append NaN
+            history["M_g_avg"].append(float('nan'))
+            history["C_def"].append(float('nan'))
+            history["H_Lambda"].append(float('nan'))
+        
+        # Save intermediate results (only at metrics frequency to avoid too frequent I/O)
+        if epoch % metrics_freq == 0:
             # Convert numpy/torch types to native Python types for JSON serialization
             def convert_to_native(obj):
                 """Recursively convert numpy/torch types to native Python types."""
