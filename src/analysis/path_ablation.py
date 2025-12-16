@@ -100,6 +100,7 @@ def compute_eigenpath_ablation(
     power_iters: int = 30,    # kept for API compatibility, not used now
     ridge: float = 1e-4,
     n_classes: Optional[int] = None,  # Number of classes (None for binary)
+    alpha: float = 1.0,  # Alpha scaling factor for labels
 ) -> Dict[str, object]:
     """
     Eigenpath ablation study using a *consistent* kernel:
@@ -247,10 +248,10 @@ def compute_eigenpath_ablation(
             train_error = torch.mean((y_train_pred - y_train) ** 2).item()
             test_error = torch.mean((y_test_pred - y_test) ** 2).item()
         else:
-            # For multi-class, compute cross-entropy loss
+            # For multi-class, compute cross-entropy loss (y_train/y_test are already class indices)
             import torch.nn.functional as F
-            train_error = F.cross_entropy(y_train_pred, y_train.long()).item()
-            test_error = F.cross_entropy(y_test_pred, y_test.long()).item()
+            train_error = F.cross_entropy(y_train_pred, y_train).item()
+            test_error = F.cross_entropy(y_test_pred, y_test).item()
 
         # Accuracies (binary: sign agreement, multi-class: argmax)
         train_acc = _compute_accuracy(y_train_pred, y_train, n_classes)
@@ -464,6 +465,7 @@ def compute_layerwise_path_ablation(
     power_iters: int = 30,    # kept for API compatibility, not used now
     ridge: float = 1e-4,
     n_classes: Optional[int] = None,  # Number of classes (None for binary)
+    alpha: float = 1.0,  # Alpha scaling factor for labels
 ) -> Dict[int, Dict[str, object]]:
     """
     Layer-wise path ablation using a *consistent* linear kernel on concatenated
@@ -521,12 +523,24 @@ def compute_layerwise_path_ablation(
             y_train = y_train.view(-1)
         if y_test.dim() > 1:
             y_test = y_test.view(-1)
-        # Convert {-1, +1} to {0, 1} if needed for binary, or ensure 0..n-1 for multi-class
-        if y_train.min() < 0:
-            # Assume {-1, +1} format, convert to {0, 1} for binary, or keep as-is for multi-class
-            if n_classes == 2:
-                y_train = ((y_train + 1) / 2).long()
-                y_test = ((y_test + 1) / 2).long()
+        # Convert scaled labels (0, alpha, 2*alpha, ...) back to class indices (0, 1, 2, ...)
+        if alpha != 1.0:
+            y_train = (y_train / alpha).long()
+            y_test = (y_test / alpha).long()
+            # Clamp to valid range [0, n_classes-1] to avoid out-of-bounds errors
+            y_train = torch.clamp(y_train, 0, n_classes - 1)
+            y_test = torch.clamp(y_test, 0, n_classes - 1)
+        else:
+            # Convert {-1, +1} to {0, 1} if needed for binary, or ensure 0..n-1 for multi-class
+            if y_train.min() < 0:
+                # Assume {-1, +1} format, convert to {0, 1} for binary, or keep as-is for multi-class
+                if n_classes == 2:
+                    y_train = ((y_train + 1) / 2).long()
+                    y_test = ((y_test + 1) / 2).long()
+            else:
+                # Ensure labels are long integers for class indices
+                y_train = y_train.long()
+                y_test = y_test.long()
 
     results: Dict[int, Dict[str, object]] = {}
 
@@ -655,6 +669,7 @@ def compute_layerwise_hidden_ablation(
     device: Optional[str] = None,
     ridge: float = 1e-4,
     n_classes: Optional[int] = None,  # Number of classes (None for binary)
+    alpha: float = 1.0,  # Alpha scaling factor for labels
 ) -> Dict[int, Dict[str, object]]:
     """
     Compute layer-wise hidden kernel ablation: for each layer l, compute hidden kernel h_l(x)^T h_l(x)
@@ -720,9 +735,14 @@ def compute_layerwise_hidden_ablation(
     if y_train.dim() > 1:
         y_train = y_train.view(-1)
     if n_classes is not None and n_classes > 1:
-        # For multi-class, ensure labels are class indices (0..n_classes-1)
-        if y_train.min() < 0 and n_classes == 2:
+        # For multi-class, convert scaled labels (0, alpha, 2*alpha, ...) back to class indices (0, 1, 2, ...)
+        if alpha != 1.0:
+            y_train = (y_train / alpha).long()
+            y_train = torch.clamp(y_train, 0, n_classes - 1)
+        elif y_train.min() < 0 and n_classes == 2:
             y_train = ((y_train + 1) / 2).long()
+        else:
+            y_train = y_train.long()
     
     # Test
     seen = 0
@@ -761,9 +781,14 @@ def compute_layerwise_hidden_ablation(
     if y_test.dim() > 1:
         y_test = y_test.view(-1)
     if n_classes is not None and n_classes > 1:
-        # For multi-class, ensure labels are class indices (0..n_classes-1)
-        if y_test.min() < 0 and n_classes == 2:
+        # For multi-class, convert scaled labels (0, alpha, 2*alpha, ...) back to class indices (0, 1, 2, ...)
+        if alpha != 1.0:
+            y_test = (y_test / alpha).long()
+            y_test = torch.clamp(y_test, 0, n_classes - 1)
+        elif y_test.min() < 0 and n_classes == 2:
             y_test = ((y_test + 1) / 2).long()
+        else:
+            y_test = y_test.long()
     
     results = {}
     

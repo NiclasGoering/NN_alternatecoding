@@ -1,0 +1,40 @@
+# config_mnist_standard.yaml
+# Config for MNIST experiment with standard MLP architecture
+# Sweeps over different depths and widths
+experiment_name: standard_mnist_depth_width_sweep
+seed: 123
+device: cuda  # Use GPU (H100) - set to 'cpu' if no GPU available
+
+dataset:
+  name: mnist
+  task_type: multiclass  # Options: "multiclass" or "binary"
+  random_labels: false
+  n_train: 50000  # MNIST has 60k training samples
+  n_val: 10000
+  n_test: 10000
+  alpha: 1.0  # Single value (no sweep)
+
+model:
+  architecture: standard  # Standard MLP (no parameterizations)
+  # Depth and width will be swept over
+  depths: [1,2,3, 4, 7,12]
+  widths: [16,32, 64,128,256,512, 1024,2048,5124] # Different depths to test  # Different widths to test
+  activation: relu  # Options: relu, gelu, tanh, sigmoid, elu
+  bias: true
+
+training:
+  algo: sgd  # Only 'sgd' is supported
+  epochs: 2500  # Reduced for speed, can be adjusted
+  batch_size: 2048  # Larger batch size for H100 efficiency
+  lr_w: 5e-4  # Learning rate
+  grad_clip_max_norm: 100.0  # Max-norm gradient clipping (0 disables)
+  loss: mse
+  optimizer: sgd  # Options: "sgd" or "adam"
+
+logging:
+  eval_every_cycle: true
+  save_checkpoints: false  # Disable to save disk space
+  save_model: false  # Set to false to save disk space
+  # Track metrics every n epochs (only final metrics needed)
+  metrics_every_n_epochs: 2000  # Only track at the end
+

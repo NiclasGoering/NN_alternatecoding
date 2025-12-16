@@ -145,9 +145,10 @@ def run_algorithm(
 
     # Final evaluation
     n_classes = meta.get("n_classes", 1)
-    trA, trL = _eval(model, full_train_loader, device, n_classes)
-    vaA, vaL = _eval(model, val_loader, device, n_classes)
-    teA, teL = _eval(model, test_loader, device, n_classes)
+    alpha = meta.get("alpha", 1.0)
+    trA, trL = _eval(model, full_train_loader, device, n_classes, alpha)
+    vaA, vaL = _eval(model, val_loader, device, n_classes, alpha)
+    teA, teL = _eval(model, test_loader, device, n_classes, alpha)
 
     # Save artifacts
     # Save final model only if save_model is enabled
@@ -447,7 +448,7 @@ def main():
 
 
 @torch.no_grad()
-def _eval(model, loader, device, n_classes=None):
+def _eval(model, loader, device, n_classes=None, alpha=1.0):
     """Evaluate model for binary or multi-class classification."""
     model.eval()
     L = A = n = 0.0
@@ -469,15 +470,21 @@ def _eval(model, loader, device, n_classes=None):
             L += torch.mean((yhat - yb) ** 2).item() * xb.size(0)
             A += torch.sign(yhat).eq(yb).float().mean().item() * xb.size(0)
         else:
-            # Multi-class classification: Cross-entropy loss and argmax accuracy
-            import torch.nn.functional as F
-            # Ensure yb is long for cross-entropy
+            # Multi-class classification: MSE loss with one-hot targets scaled by alpha
+            # yb contains scaled class indices (e.g., 0, 10, 20, ..., 90 for alpha=10)
+            # Convert to one-hot encoding scaled by alpha
             if yb.dim() > 1:
-                yb = yb.view(-1)
-            yb_long = yb.long()
-            L += F.cross_entropy(yhat, yb_long).item() * xb.size(0)
+                yb = yb.view(-1)  # Flatten to 1D
+            yb_class = (yb / alpha).long()  # Get original class index
+            # Clamp to valid range [0, n_classes-1] to avoid CUDA assert errors
+            yb_class = torch.clamp(yb_class, 0, n_classes - 1)
+            yb_onehot = torch.zeros_like(yhat)
+            src_values = torch.ones_like(yb.unsqueeze(1)) * alpha
+            yb_onehot.scatter_(1, yb_class.unsqueeze(1), src_values)  # Fill with scaled alpha value
+            L += torch.mean((yhat - yb_onehot)**2).item() * xb.size(0)
+            # Accuracy: argmax prediction vs original class index
             pred = yhat.argmax(dim=1)
-            A += (pred == yb_long).float().mean().item() * xb.size(0)
+            A += (pred == yb_class).float().mean().item() * xb.size(0)
         
         n += xb.size(0)
     

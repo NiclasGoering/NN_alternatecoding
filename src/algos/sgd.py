@@ -295,6 +295,7 @@ def train_sgd(model, train_loader, val_loader, config, test_loader=None):
                         n_interventions=50,  # Test 50 intervention pairs
                         device=device,
                         n_classes=n_classes_iia,
+                        alpha=alpha,
                     )
                     # Store for history
                     iia_metrics_epoch0 = iia_results_epoch0
@@ -404,8 +405,11 @@ def train_sgd(model, train_loader, val_loader, config, test_loader=None):
                 if yb.dim() > 1:
                     yb = yb.view(-1)  # Flatten to 1D
                 yb_class = (yb / alpha).long()  # Get original class index
+                # Clamp to valid range [0, n_classes-1] to avoid CUDA assert errors
+                yb_class = torch.clamp(yb_class, 0, n_classes - 1)
                 yb_onehot = torch.zeros_like(yhat)
-                yb_onehot.scatter_(1, yb_class.unsqueeze(1), yb.unsqueeze(1))  # Fill with scaled alpha value
+                src_values = torch.ones_like(yb.unsqueeze(1)) * alpha
+                yb_onehot.scatter_(1, yb_class.unsqueeze(1), src_values)  # Fill with scaled alpha value
                 loss = mse_loss(yhat, yb_onehot)
             opt.zero_grad(); loss.backward(); opt.step()
         tr_acc, tr_loss = _eval(model, train_loader, device, n_classes, alpha)
@@ -473,12 +477,12 @@ def train_sgd(model, train_loader, val_loader, config, test_loader=None):
                     traceback.print_exc()
         
         # Early stopping check
-        if test_loss is not None and test_loss < 0.01:
-            print(f"Early stopping: test loss {test_loss:.6f} < 0.01")
+        if test_loss is not None and test_loss < 1e-4:
+            print(f"Early stopping: test loss {test_loss:.6f} < 1e-4")
             early_stopped = True
         
-        if va_loss < 0.01:
-            print(f"Early stopping: validation loss {va_loss:.6f} < 0.01")
+        if va_loss < 1e-4:
+            print(f"Early stopping: validation loss {va_loss:.6f} < 1e-4")
             early_stopped = True
         
         # Initialize IIA metrics (will be populated during path analysis if applicable)
@@ -622,6 +626,7 @@ def train_sgd(model, train_loader, val_loader, config, test_loader=None):
                                 n_interventions=50,  # Test 50 intervention pairs
                                 device=device,
                                 n_classes=n_classes_iia,
+                                alpha=alpha,
                             )
                             
                             # Store for adding to history (update the last history entry)
@@ -834,6 +839,7 @@ def train_sgd(model, train_loader, val_loader, config, test_loader=None):
                 block_size=path_kernel_block_size,
                 power_iters=path_kernel_power_iters,
                 n_classes=n_classes,
+                alpha=alpha,
             )
             
             # Plot ablation results
@@ -890,6 +896,7 @@ def train_sgd(model, train_loader, val_loader, config, test_loader=None):
                     block_size=path_kernel_block_size,
                     power_iters=path_kernel_power_iters,
                     n_classes=n_classes,
+                    alpha=alpha,
                 )
                 
                 # Plot layer-wise path ablation
@@ -917,6 +924,7 @@ def train_sgd(model, train_loader, val_loader, config, test_loader=None):
                     max_samples=1000,
                     device=device,
                     n_classes=n_classes,
+                    alpha=alpha,
                 )
                 
                 # Plot layer-wise hidden ablation
@@ -1130,8 +1138,11 @@ def _eval(model, loader, device, n_classes=None, alpha=1.0):
             if yb.dim() > 1:
                 yb = yb.view(-1)  # Flatten to 1D
             yb_class = (yb / alpha).long()  # Get original class index
+            # Clamp to valid range [0, n_classes-1] to avoid CUDA assert errors
+            yb_class = torch.clamp(yb_class, 0, n_classes - 1)
             yb_onehot = torch.zeros_like(yhat)
-            yb_onehot.scatter_(1, yb_class.unsqueeze(1), yb.unsqueeze(1))  # Fill with scaled alpha value
+            src_values = torch.ones_like(yb.unsqueeze(1)) * alpha
+            yb_onehot.scatter_(1, yb_class.unsqueeze(1), src_values)  # Fill with scaled alpha value
             L += torch.mean((yhat - yb_onehot)**2).item() * xb.size(0)
             # Accuracy: argmax prediction vs original class index
             pred = yhat.argmax(dim=1)

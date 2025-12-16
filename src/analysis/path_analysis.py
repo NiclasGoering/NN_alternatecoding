@@ -3680,6 +3680,7 @@ def compute_interchange_intervention_accuracy(
     n_interventions: int = 100,
     device: Optional[str] = None,
     n_classes: Optional[int] = None,  # Number of classes (None for binary)
+    alpha: float = 1.0,  # Alpha scaling factor for labels
 ) -> Dict[str, float]:
     """
     Compute Interchange Intervention Accuracy (IIA) - a causal metric.
@@ -3761,8 +3762,18 @@ def compute_interchange_intervention_accuracy(
             base_x = all_x[j:j+1]
             base_y = all_y[j]
             
-            # Only intervene if labels are different
-            if source_y.item() != base_y.item():
+            # Only intervene if labels are different (compare class indices, not scaled values)
+            source_y_val = source_y.item()
+            base_y_val = base_y.item()
+            if alpha != 1.0 and n_classes is not None and n_classes > 1:
+                # For multiclass with alpha scaling, compare class indices
+                source_class = int(source_y_val / alpha)
+                base_class = int(base_y_val / alpha)
+                labels_different = (source_class != base_class)
+            else:
+                labels_different = (source_y_val != base_y_val)
+            
+            if labels_different:
                 source_data.append((source_x, source_y))
                 base_data.append((base_x, base_y))
                 pairs_found += 1
@@ -3842,7 +3853,14 @@ def compute_interchange_intervention_accuracy(
         else:
             # Multi-class classification: use argmax
             pred_class = intervened_output.argmax(dim=1).item()
-            true_class = source_y.item()
+            true_class_scaled = source_y.item()
+            
+            # Convert scaled label (0, alpha, 2*alpha, ...) back to class index (0, 1, 2, ...)
+            if alpha != 1.0:
+                true_class = int(true_class_scaled / alpha)
+                true_class = max(0, min(n_classes - 1, true_class))  # Clamp to valid range
+            else:
+                true_class = int(true_class_scaled)
             
             # Handle label format conversion if needed
             if isinstance(true_class, float) and true_class < 0:

@@ -1,5 +1,5 @@
 # config_mnist.yaml
-experiment_name: 09_12/mnist_run_1
+experiment_name: 10_12/mnist_run_1
 seed: 123
 device: cuda  # Use GPU (H100) - set to 'cpu' if no GPU available
 
@@ -25,7 +25,7 @@ dataset:
   n_test: 10000
   # Alpha parameter: multiplies output labels (can be a list to sweep over values)
   # e.g., alpha=5 means labels 0,1 become 0,5 (or -1,+1 become -5,+5)
-  alpha: [1.0, 10.0]  # Can be a single value or list for sweeping
+  alpha: [1.0,5.0,10.0]  # Can be a single value or list for sweeping
 
 model:
   widths: [1024, 1024, 1024, 1024]
@@ -34,12 +34,12 @@ model:
 
 training:
   algo: sgd  # Only 'sgd' is supported
-  epochs: 2000
-  batch_size: 512
+  epochs: 5000
+  batch_size: 1024
   lr_w: 5e-4  # Learning rate
   loss: mse
   # Optimizer: "sgd" or "adam" (can be a list to sweep over both)
-  optimizer: ["sgd", "adam"]  # Options: "sgd" or "adam"
+  optimizer: [ "sgd","adam"]  # Options: "sgd" or "adam"
 
 logging:
   eval_every_cycle: true
